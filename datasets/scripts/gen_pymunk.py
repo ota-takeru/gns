@@ -11,7 +11,6 @@ from pymunk.vec2d import Vec2d
 RNG = random.Random(42)
 NP_RNG = np.random.default_rng(42)
 
-
 def make_space(g=(0.0, -9.81)):
     space = pymunk.Space()
     space.gravity = g
