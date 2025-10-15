@@ -1,15 +1,12 @@
-# scripts/gen_pymunk.py
 import json
 import math
 import random
 from pathlib import Path
-import h5py
 import numpy as np
 import pymunk
-from pymunk.vec2d import Vec2d
 
 RNG = random.Random(42)
-NP_RNG = np.random.default_rng(42)
+
 
 def make_space(g=(0.0, -9.81)):
     space = pymunk.Space()
@@ -29,6 +26,7 @@ def add_static_bounds(space, left=-5, right=5, bottom=0, top=8):
         s.friction = 0.6
         s.elasticity = 0.0
     space.add(*segs)
+    return segs
 
 
 def add_random_rigid(space, x_range=(-3, 3), y=5.0):
@@ -72,8 +70,14 @@ def sample_points_on_shape(shape, density=12):
             ):
                 segs.append(a * (1 - t) + b * t)
         pts = np.array(segs, dtype=np.float32)
+    elif isinstance(shape, pymunk.Segment):
+        a = np.array(shape.a, dtype=np.float32)
+        b = np.array(shape.b, dtype=np.float32)
+        num = max(2, density)
+        ts = np.linspace(0.0, 1.0, num=num, endpoint=False)
+        pts = (1.0 - ts)[:, None] * a + ts[:, None] * b
     else:
-        # Segmentなどはスキップ
+        # その他のshapeタイプには未対応
         pts = np.zeros((0, 2), dtype=np.float32)
     return pts  # (M,2) ローカル
 
@@ -86,43 +90,46 @@ def world_from_local(body, local_pts):
     return (local_pts @ R.T) + np.array(body.position, dtype=np.float32)
 
 
-def point_velocity(body, world_pts):
-    # v_point = v_cm + omega x r  in 2D: omega*z × r(x,y) = (-omega*y, omega*x)
-    if len(world_pts) == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    r = world_pts - np.array(body.position, dtype=np.float32)
-    omega = body.angular_velocity
-    cross = np.stack([-omega * r[:, 1], omega * r[:, 0]], axis=1)
-    v = np.array(body.velocity, dtype=np.float32)
-    return v + cross
-
-
 def generate_scene(T=240, dt=1 / 120, substeps=4, n_bodies=(4, 8), density=16):
     space = make_space()
-    add_static_bounds(space)
+    static_shapes = add_static_bounds(space)
 
     # 剛体生成
     nb = RNG.randint(*n_bodies)
-    bodies, shapes, local_pts = [], [], []
+    bodies, local_pts = [], []
     for _ in range(nb):
         b, s = add_random_rigid(space)
         bodies.append(b)
-        shapes.append(s)
         local_pts.append(sample_points_on_shape(s, density=density))
-    # サンプル点を連結して粒子化
-    body_offsets = []
-    offset = 0
-    for pts in local_pts:
-        body_offsets.append((offset, offset + len(pts)))
-        offset += len(pts)
-    N = offset
+    # 境界（静的剛体）も粒子化
+    static_body = space.static_body
+    static_pts = [
+        sample_points_on_shape(s, density=density)
+        for s in static_shapes
+        if s is not None
+    ]
+    static_pts = [pts for pts in static_pts if len(pts) > 0]
+    static_pts_all = (
+        np.concatenate(static_pts, axis=0)
+        if len(static_pts) > 0
+        else np.zeros((0, 2), dtype=np.float32)
+    )
+
+    entries = []
+    N = 0
+    for rigid_idx, (body, pts_local) in enumerate(zip(bodies, local_pts)):
+        if len(pts_local) == 0:
+            continue
+        entries.append((body, pts_local, rigid_idx))
+        N += len(pts_local)
+
+    if len(static_pts_all) > 0:
+        static_rigid_id = nb
+        entries.append((static_body, static_pts_all, static_rigid_id))
+        N += len(static_pts_all)
 
     positions = np.zeros((T, N, 2), np.float32)
-    velocities = np.zeros((T, N, 2), np.float32)
-    node_attr = np.zeros(
-        (N, 6), np.float32
-    )  # [mass, type_onehot(2), body_id, elasticity, friction]
-    globals_arr = np.zeros((T, 3), np.float32)  # [gx, gy, dt]
+    rigid_ids = np.zeros((N,), np.int32)
 
     # 固定dtで進めつつ記録
     sub_dt = dt / substeps
@@ -132,34 +139,14 @@ def generate_scene(T=240, dt=1 / 120, substeps=4, n_bodies=(4, 8), density=16):
 
         # 記録
         idx = 0
-        for i, (b, s) in enumerate(zip(bodies, shapes)):
-            pts_local = local_pts[i]
-            pts_world = world_from_local(b, pts_local)
+        for body, pts_local, rigid_id in entries:
+            pts_world = world_from_local(body, pts_local)
             positions[t, idx : idx + len(pts_local)] = pts_world
-            velocities[t, idx : idx + len(pts_local)] = point_velocity(b, pts_world)
 
-            # 固定属性（最初のフレームだけ埋める）
             if t == 0:
-                mass = b.mass
-                body_id = float(i)
-                elast = getattr(s, "elasticity", 0.0)
-                fric = getattr(s, "friction", 0.5)
-                # type_onehot: [rigid, static]
-                node_attr[idx : idx + len(pts_local), 0] = mass
-                node_attr[idx : idx + len(pts_local), 1] = 1.0  # rigid=1
-                node_attr[idx : idx + len(pts_local), 2] = 0.0  # static=0
-                node_attr[idx : idx + len(pts_local), 3] = body_id
-                node_attr[idx : idx + len(pts_local), 4] = elast
-                node_attr[idx : idx + len(pts_local), 5] = fric
+                rigid_ids[idx : idx + len(pts_local)] = rigid_id
 
             idx += len(pts_local)
-
-        globals_arr[t] = np.array([space.gravity[0], space.gravity[1], dt], np.float32)
-
-    # 教師（速度教師にする例：v_{t+1}を正解に）
-    target = np.zeros_like(velocities)
-    target[:-1] = velocities[1:]
-    target[-1] = velocities[-1]  # 末尾はコピーでOK（使用時に除外でも可）
 
     meta = dict(
         seed=42,
@@ -167,35 +154,30 @@ def generate_scene(T=240, dt=1 / 120, substeps=4, n_bodies=(4, 8), density=16):
         dt=dt,
         substeps=substeps,
         note="pymunk random drop scene",
+        static_particles=int(len(static_pts_all)),
+        dynamic_particles=int(N - len(static_pts_all)),
     )
-    return positions, velocities, node_attr, globals_arr, target, meta
+    return positions, rigid_ids, meta
 
 
-def save_h5(
-    path,
-    scene_idx,
-    positions,
-    velocities,
-    node_attr,
-    globals_arr,
-    target,
-    meta,
-    split="train",
-):
-    with h5py.File(path, "a") as f:
-        grp = f.require_group(f"/{split}/scene_{scene_idx:03d}")
-        grp.create_dataset("positions", data=positions, compression="gzip")
-        grp.create_dataset("velocities", data=velocities, compression="gzip")
-        grp.create_dataset("node_attr", data=node_attr, compression="gzip")
-        grp.create_dataset("globals", data=globals_arr, compression="gzip")
-        grp.create_dataset("target", data=target, compression="gzip")
-        grp.attrs["meta"] = json.dumps(meta)
+def save_npz(out_dir, scene_idx, positions, rigid_ids, meta, split="train"):
+    split_dir = out_dir / split if split else out_dir
+    split_dir.mkdir(parents=True, exist_ok=True)
+    path = split_dir / f"scene_{scene_idx:03d}.npz"
+    np.savez_compressed(
+        path,
+        position=positions,
+        rigid_id=rigid_ids,
+        meta=np.array(json.dumps(meta)),
+    )
+    return path
 
 
 if __name__ == "__main__":
-    out = Path(__file__).resolve().parents[1] / "out" / "train.h5"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    for i in range(50):  # 50シーンだけ試しに
-        pos, vel, na, glb, tgt, meta = generate_scene()
-        save_h5(out, i, pos, vel, na, glb, tgt, meta, split="train")
-    print("saved:", out)
+    out_root = Path(__file__).resolve().parents[1] / "out"
+    num_scenes = 5 # シーン数
+    split = "train"
+    for i in range(num_scenes):
+        pos, rigid_ids, meta = generate_scene()
+        save_npz(out_root, i, pos, rigid_ids, meta, split=split)
+    print(f"Generated {num_scenes} scenes in {out_root / split}")

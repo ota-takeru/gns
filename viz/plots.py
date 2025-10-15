@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 def plot_time_series(pos, vel, idx_n=0, save=None, title="pos/vel over time"):
     """1粒子のx(t), v_x(t)の波形。まずはこれで崩れを検知。"""
@@ -10,6 +11,8 @@ def plot_time_series(pos, vel, idx_n=0, save=None, title="pos/vel over time"):
     ax[1].plot(t, vel[:, idx_n, 0]); ax[1].set_ylabel("vx")
     ax[1].set_xlabel("t (step)")
     fig.suptitle(title); fig.tight_layout()
-    if save: fig.savefig(save, dpi=150)
+    if save:
+        save_path = Path(save)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
     return fig
-
