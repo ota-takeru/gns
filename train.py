@@ -1,126 +1,572 @@
-import argparse
-from pathlib import Path
-from typing import Dict, Sequence, Tuple, Union
+import os
+import re
+import glob
+import json
+import pickle
+from dataclasses import dataclass
+from typing import Optional, Tuple, Dict, Any
 
+import yaml
 import numpy as np
+import torch
+from tqdm import tqdm
 
-from data_loader import GNSDataSample, load_gns_scene
+# --- gns モジュール群（あなたの環境のパスに応じて調整してください） ---
+from gns import learned_simulator
+from gns import noise_utils
+from gns import reading_utils
+from gns import data_loader
 
-FeaturesDict = Dict[str, np.ndarray]
+# -----------------------
+# 設定
+# -----------------------
+INPUT_SEQUENCE_LENGTH = 6   # 先頭6ステップを履歴として使う（速度5本が引ける）
+NUM_PARTICLE_TYPES = 9
+KINEMATIC_PARTICLE_ID = 3
 
+@dataclass
+class Config:
+    mode: str = "train"                         # train / valid / rollout
+    data_path: str = "./data/"
+    model_path: str = "./models/"
+    output_path: str = "./rollouts/"
+    output_filename: str = "rollout"
 
-def _parse_noise_std(values: Sequence[float]) -> Union[float, Tuple[float, ...]]:
-    """Convert argparse float sequence into scalar or tuple."""
-    cleaned = tuple(float(v) for v in values)
-    if not cleaned:
-        return 0.0
-    if len(cleaned) == 1:
-        return cleaned[0]
-    return cleaned
+    batch_size: int = 2
+    noise_std: float = 6.7e-4
 
+    ntraining_steps: int = int(2e7)
+    validation_interval: Optional[int] = None
+    nsave_steps: int = 5000
 
-def _select_scene_file(: Path, index: int, pattern: str = "scene_*.npz") -> Path:
-    files = sorted(dataset_dir.glob(pattern))
-    if not files:
-        raise FileNotFoundError(f"No scene files matching '{pattern}' in {dataset_dir}")
-    if index < 0:
-        index += len(files)
-    if index < 0 or index >= len(files):
-        raise IndexError(f"Scene index {index} is out of range for {len(files)} files")
-    return files[index]
+    lr_init: float = 1e-4
+    lr_decay: float = 0.1
+    lr_decay_steps: int = int(5e6)
 
+    model_file: Optional[str] = None            # "latest" or ファイル名 or null
+    train_state_file: Optional[str] = "train_state.pt"  # "latest" or ファイル名 or null
 
-def prepare_training_tensors(sample: GNSDataSample) -> Tuple[FeaturesDict, np.ndarray, np.ndarray]:
-    valid_idx = np.flatnonzero(sample.valid_targets)
-    if valid_idx.size == 0:
-        raise ValueError("Sample does not contain any valid target time steps.")
+    cuda_device_number: Optional[int] = None    # null で自動選択
 
-    rigid_over_time = np.broadcast_to(
-        sample.rigid_id,
-        (sample.noisy_positions.shape[0], sample.rigid_id.shape[0]),
+def load_config(path: str) -> Config:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    return Config(**raw)
+
+# -----------------------
+# 共通ユーティリティ
+# -----------------------
+def optimizer_to(optim: torch.optim.Optimizer, device: torch.device):
+    """オプティマイザ内部のテンソルを所定デバイスへ移動（再開学習の整合用）"""
+    for state in optim.state.values():
+        if isinstance(state, torch.Tensor):
+            state.data = state.data.to(device)
+            if state._grad is not None:
+                state._grad.data = state._grad.data.to(device)
+        elif isinstance(state, dict):
+            for sub in state.values():
+                if isinstance(sub, torch.Tensor):
+                    sub.data = sub.data.to(device)
+                    if sub._grad is not None:
+                        sub._grad.data = sub._grad.data.to(device)
+
+def acceleration_loss(pred_acc: torch.Tensor,
+                      target_acc: torch.Tensor,
+                      non_kinematic_mask: torch.Tensor) -> torch.Tensor:
+    """
+    加速度MSE（非運動学粒子のみ）
+    pred_acc, target_acc: (..., N, D)
+    non_kinematic_mask: (N,)
+    """
+    loss = (pred_acc - target_acc) ** 2
+    loss = loss.sum(dim=-1)  # D 次元を和
+    num_non_kinematic = non_kinematic_mask.sum()
+    masked = torch.where(non_kinematic_mask.bool(), loss, torch.zeros_like(loss))
+    return masked.sum() / num_non_kinematic.clamp(min=1)
+
+def save_model_and_train_state(simulator: learned_simulator.LearnedSimulator,
+                               cfg: Config,
+                               step: int,
+                               epoch: int,
+                               optimizer: torch.optim.Optimizer,
+                               train_loss: Optional[float],
+                               valid_loss: Optional[float],
+                               train_loss_hist,
+                               valid_loss_hist):
+    os.makedirs(cfg.model_path, exist_ok=True)
+
+    # モデル保存
+    model_fname = os.path.join(cfg.model_path, f"model-{step}.pt")
+    simulator.save(model_fname)
+
+    # train_state 保存
+    train_state = dict(
+        optimizer_state=optimizer.state_dict(),
+        global_train_state={
+            "step": step,
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "valid_loss": valid_loss,
+        },
+        loss_history={"train": train_loss_hist, "valid": valid_loss_hist},
+        used_config=_asjsonable_cfg(cfg),
     )
+    ts_fname = os.path.join(cfg.model_path, f"train_state-{step}.pt")
+    torch.save(train_state, ts_fname)
 
-    features: FeaturesDict = {
-        "noisy_position": sample.noisy_positions[valid_idx],
-        "velocity": sample.velocities[valid_idx],
-        "rigid_id": rigid_over_time[valid_idx],
+def _asjsonable_cfg(cfg: Config) -> Dict[str, Any]:
+    # dataclass → dict（JSON化しやすい形に）
+    return {
+        "mode": cfg.mode,
+        "data_path": cfg.data_path,
+        "model_path": cfg.model_path,
+        "output_path": cfg.output_path,
+        "output_filename": cfg.output_filename,
+        "batch_size": cfg.batch_size,
+        "noise_std": cfg.noise_std,
+        "ntraining_steps": cfg.ntraining_steps,
+        "validation_interval": cfg.validation_interval,
+        "nsave_steps": cfg.nsave_steps,
+        "lr_init": cfg.lr_init,
+        "lr_decay": cfg.lr_decay,
+        "lr_decay_steps": cfg.lr_decay_steps,
+        "model_file": cfg.model_file,
+        "train_state_file": cfg.train_state_file,
+        "cuda_device_number": cfg.cuda_device_number,
     }
-    targets = sample.accelerations[valid_idx]
-    time_index = valid_idx.astype(np.int32, copy=False)
-    return features, targets, time_index
 
+# -----------------------
+# モデル生成
+# -----------------------
+def _get_simulator(metadata: Dict[str, Any],
+                   acc_noise_std: float,
+                   vel_noise_std: float,
+                   device: torch.device) -> learned_simulator.LearnedSimulator:
+    """LearnedSimulator をメタ情報から生成"""
+    normalization_stats = {
+        'acceleration': {
+            'mean': torch.FloatTensor(metadata['acc_mean']).to(device),
+            'std': torch.sqrt(torch.FloatTensor(metadata['acc_std'])**2 + acc_noise_std**2).to(device),
+        },
+        'velocity': {
+            'mean': torch.FloatTensor(metadata['vel_mean']).to(device),
+            'std': torch.sqrt(torch.FloatTensor(metadata['vel_std'])**2 + vel_noise_std**2).to(device),
+        },
+    }
 
-def _report_scene(
-    scene_path: Path,
-    sample: GNSDataSample,
-    features: FeaturesDict,
-    targets: np.ndarray,
-    time_index: np.ndarray,
-) -> None:
-    print(f"Loaded scene: {scene_path}")
-    t_steps, num_particles, dims = sample.positions.shape
-    print(f"Frames: {t_steps}, Particles: {num_particles}, Dimensions: {dims}")
-    print(f"Valid target steps: {time_index.size}/{t_steps}")
-    print(f"dt: {sample.dt}")
-    meta_keys = ", ".join(sorted(sample.meta)) if sample.meta else "(none)"
-    print(f"Metadata keys: {meta_keys}")
-    print("Prepared feature tensors:")
-    for name, array in features.items():
-        print(f"  - {name}: shape={array.shape}, dtype={array.dtype}")
-    print(f"Targets: shape={targets.shape}, dtype={targets.dtype}")
-    print(f"Time indices used for training: {time_index[:8]}{'...' if time_index.size > 8 else ''}")
+    if "nnode_in" in metadata and "nedge_in" in metadata:
+        nnode_in = metadata['nnode_in']
+        nedge_in = metadata['nedge_in']
+    else:
+        # 追加特徴がない標準構成のデフォルト（実データに合わせて必要なら要調整）
+        nnode_in = 37 if metadata['dim'] == 3 else 30
+        nedge_in = metadata['dim'] + 1
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Load and prepare one GNS scene for training.")
-    default_dataset = Path(__file__).resolve().parent / "datasets" / "out" / "train"
-    parser.add_argument(
-        "--dataset-dir",
-        type=Path,
-        default=default_dataset,
-        help=f"Directory containing scene npz files (default: {default_dataset})",
+    simulator = learned_simulator.LearnedSimulator(
+        particle_dimensions=metadata['dim'],
+        nnode_in=nnode_in,
+        nedge_in=nedge_in,
+        latent_dim=128,
+        nmessage_passing_steps=10,
+        nmlp_layers=2,
+        mlp_hidden_dim=128,
+        connectivity_radius=metadata['default_connectivity_radius'],
+        boundaries=np.array(metadata['bounds']),
+        normalization_stats=normalization_stats,
+        nparticle_types=NUM_PARTICLE_TYPES,
+        particle_type_embedding_size=16,
+        boundary_clamp_limit=metadata.get("boundary_augment", 1.0),
+        device=device
     )
-    parser.add_argument(
-        "--scene-index",
-        type=int,
-        default=0,
-        help="Index of the scene to load (supports negative indexing).",
-    )
-    parser.add_argument(
-        "--noise-std",
-        type=float,
-        nargs="*",
-        default=(0.0,),
-        help="Optional noise standard deviation (scalar or per-dimension).",
-    )
-    parser.add_argument(
-        "--noise-clip",
-        type=float,
-        default=None,
-        help="Clip magnitude applied to sampled noise before adding it.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Random seed used for noise generation.",
-    )
-    args = parser.parse_args()
+    return simulator
 
-    dataset_dir = args.dataset_dir.expanduser().resolve()
-    scene_path = _select_scene_file(, args.scene_index)
-    noise_std = _parse_noise_std(args.noise_std)
+# -----------------------
+# 予測系（rollout / validation / predict）
+# -----------------------
+def rollout(simulator: learned_simulator.LearnedSimulator,
+            position: torch.Tensor,
+            particle_types: torch.Tensor,
+            material_property: Optional[torch.Tensor],
+            n_particles_per_example: torch.Tensor,
+            nsteps: int,
+            device: torch.device) -> Tuple[Dict[str, Any], torch.Tensor]:
+    """
+    逐次1ステップ予測をシフト窓で積み上げるロールアウト
+    position: (B, T, N, D) を想定。ここでは B=1 を前提に扱っている実装。
+    """
+    # B 次元を想定しつつコードは元実装を踏襲（B=1前提）
+    initial_positions = position[:, :INPUT_SEQUENCE_LENGTH]
+    ground_truth_positions = position[:, INPUT_SEQUENCE_LENGTH:]
 
-    sample = load_gns_scene(
-        scene_path,
-        noise_std=noise_std,
-        noise_clip=args.noise_clip,
-        seed=args.seed,
+    current_positions = initial_positions
+    predictions = []
+
+    for _ in tqdm(range(nsteps), total=nsteps):
+        next_position = simulator.predict_positions(
+            current_positions,
+            nparticles_per_example=[n_particles_per_example],
+            particle_types=particle_types,
+            material_property=material_property
+        )
+        # 運動学粒子は教師で上書き
+        kinematic_mask = (particle_types == KINEMATIC_PARTICLE_ID).to(device)
+        next_position_gt = ground_truth_positions[:, _]     # (B=1, N, D)
+        kinematic_mask = kinematic_mask.bool()[:, None].expand(-1, current_positions.shape[-1])
+        next_position = torch.where(kinematic_mask, next_position_gt, next_position)
+        predictions.append(next_position)
+        # シフト
+        current_positions = torch.cat([current_positions[:, 1:], next_position[:, None, :]], dim=1)
+
+    predictions = torch.stack(predictions)                        # (T', B, N, D) だが元実装互換に注意
+    ground_truth_positions = ground_truth_positions.permute(1, 0, 2)
+
+    loss = (predictions - ground_truth_positions) ** 2
+
+    output = {
+        'initial_positions': initial_positions.permute(1, 0, 2).cpu().numpy(),
+        'predicted_rollout': predictions.cpu().numpy(),
+        'ground_truth_rollout': ground_truth_positions.cpu().numpy(),
+        'particle_types': particle_types.cpu().numpy(),
+        'material_property': material_property.cpu().numpy() if material_property is not None else None
+    }
+    return output, loss
+
+def validation(simulator,
+               example,
+               n_features: int,
+               cfg: Config,
+               device: torch.device) -> torch.Tensor:
+    position = example[0][0].to(device)
+    particle_type = example[0][1].to(device)
+    if n_features == 3:
+        material_property = example[0][2].to(device)
+        n_particles_per_example = example[0][3].to(device)
+    elif n_features == 2:
+        material_property = None
+        n_particles_per_example = example[0][2].to(device)
+    else:
+        raise NotImplementedError
+    labels = example[1].to(device)
+
+    sampled_noise = noise_utils.get_random_walk_noise_for_position_sequence(
+        position, noise_std_last_step=cfg.noise_std).to(device)
+    non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
+    sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
+
+    with torch.no_grad():
+        pred_acc, target_acc = simulator.predict_accelerations(
+            next_positions=labels,
+            position_sequence_noise=sampled_noise,
+            position_sequence=position,
+            nparticles_per_example=n_particles_per_example,
+            particle_types=particle_type,
+            material_property=material_property
+        )
+    loss = acceleration_loss(pred_acc, target_acc, non_kinematic_mask)
+    return loss
+
+def predict(cfg: Config, device: torch.device):
+    """valid/rollout モードの入口"""
+    metadata = reading_utils.read_metadata(cfg.data_path, "rollout")
+    simulator = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
+
+    # モデル読み込み
+    model_path = _resolve_model_path(cfg)
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model does not exist at {model_path}")
+    simulator.load(model_path)
+    simulator.to(device)
+    simulator.eval()
+
+    # 出力ディレクトリ
+    os.makedirs(cfg.output_path, exist_ok=True)
+
+    # valid.npz がなければ test.npz
+    valid_npz = os.path.join(cfg.data_path, "valid.npz")
+    split = "test" if (cfg.mode == "rollout" or (not os.path.isfile(valid_npz))) else "valid"
+
+    ds = data_loader.get_data_loader_by_trajectories(path=os.path.join(cfg.data_path, f"{split}.npz"))
+
+    # 特徴数（material_property の有無）を判定
+    first = ds.dataset._data[0]
+    if len(first) == 3:
+        material_property_as_feature = True
+    elif len(first) == 2:
+        material_property_as_feature = False
+    else:
+        raise NotImplementedError
+
+    eval_loss = []
+    with torch.no_grad():
+        for example_i, features in enumerate(ds):
+            print(f"processing example number {example_i}")
+            positions = features[0].to(device)
+            # nsteps 計算
+            if metadata.get('sequence_length') is not None:
+                nsteps = int(metadata['sequence_length']) - INPUT_SEQUENCE_LENGTH
+            else:
+                sequence_length = positions.shape[1]
+                nsteps = int(sequence_length) - INPUT_SEQUENCE_LENGTH
+
+            particle_type = features[1].to(device)
+            if material_property_as_feature:
+                material_property = features[2].to(device)
+                n_particles_per_example = torch.tensor([int(features[3])], dtype=torch.int32).to(device)
+            else:
+                material_property = None
+                n_particles_per_example = torch.tensor([int(features[2])], dtype=torch.int32).to(device)
+
+            example_rollout, loss = rollout(simulator,
+                                            positions,
+                                            particle_type,
+                                            material_property,
+                                            n_particles_per_example,
+                                            nsteps,
+                                            device)
+            example_rollout['metadata'] = metadata
+            print(f"Predicting example {example_i} loss: {loss.mean()}")
+            eval_loss.append(torch.flatten(loss))
+
+            # ロールアウトの保存
+            if cfg.mode == 'rollout':
+                example_rollout['loss'] = loss.mean()
+                filename = f'{cfg.output_filename}_ex{example_i}.pkl'
+                filename = os.path.join(cfg.output_path, filename)
+                with open(filename, 'wb') as f:
+                    pickle.dump(example_rollout, f)
+
+    print("Mean loss on rollout prediction: {}".format(torch.mean(torch.cat(eval_loss))))
+
+def _resolve_model_path(cfg: Config) -> str:
+    """cfg.model_file が 'latest' のとき最新を解決。そうでなければ結合して返す。"""
+    os.makedirs(cfg.model_path, exist_ok=True)
+    if cfg.model_file == "latest":
+        fnames = glob.glob(os.path.join(cfg.model_path, "model-*.pt"))
+        if not fnames:
+            raise FileNotFoundError(f"No model files found in {cfg.model_path}")
+        expr = re.compile(r".*model-(\d+)\.pt")
+        latest_num = -1
+        latest_file = None
+        for fname in fnames:
+            m = expr.match(fname)
+            if m:
+                num = int(m.groups()[0])
+                if num > latest_num:
+                    latest_num = num
+                    latest_file = fname
+        if latest_file is None:
+            raise FileNotFoundError(f"Could not resolve latest model in {cfg.model_path}")
+        return latest_file
+    elif cfg.model_file:
+        return os.path.join(cfg.model_path, cfg.model_file)
+    else:
+        # 明示されていない場合：新規学習用なので存在しないパスを返す
+        return os.path.join(cfg.model_path, "model-init.pt")
+
+# -----------------------
+# 学習
+# -----------------------
+def train(cfg: Config, device: torch.device):
+    # メタ情報
+    metadata = reading_utils.read_metadata(cfg.data_path, "train")
+
+    # モデルと最適化器
+    simulator = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
+    simulator.to(device)
+    optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
+
+    # 進捗状態
+    step = 0
+    epoch = 0
+    steps_per_epoch = 0
+
+    valid_loss = None
+    epoch_train_loss = 0.0
+    epoch_valid_loss = None
+
+    train_loss_hist = []
+    valid_loss_hist = []
+
+    # 再開処理
+    if cfg.model_file is not None:
+        model_path = _resolve_model_path(cfg)
+        train_state_path = None
+        if cfg.train_state_file == "latest":
+            # モデルに合わせて同stepの train_state を探す
+            m = re.match(r".*model-(\d+)\.pt", model_path)
+            if m:
+                step_num = int(m.groups()[0])
+                candidate = os.path.join(cfg.model_path, f"train_state-{step_num}.pt")
+                if os.path.exists(candidate):
+                    train_state_path = candidate
+        elif cfg.train_state_file:
+            candidate = os.path.join(cfg.model_path, cfg.train_state_file)
+            if os.path.exists(candidate):
+                train_state_path = candidate
+
+        if os.path.exists(model_path) and train_state_path and os.path.exists(train_state_path):
+            print(f"Resume from: {model_path}, {train_state_path}")
+            simulator.load(model_path)
+
+            # Optimizer を作り直して state を読む（学習率などは後で上書き）
+            optimizer = torch.optim.Adam(simulator.parameters())
+            train_state = torch.load(train_state_path, map_location=device)
+            optimizer.load_state_dict(train_state["optimizer_state"])
+            optimizer_to(optimizer, device)
+
+            step = int(train_state["global_train_state"]["step"])
+            epoch = int(train_state["global_train_state"]["epoch"])
+            train_loss_hist = list(train_state["loss_history"]["train"])
+            valid_loss_hist = list(train_state["loss_history"]["valid"])
+        else:
+            print("Resume files not fully found; starting fresh.")
+
+    simulator.train()
+
+    # データローダ
+    dl = data_loader.get_data_loader_by_samples(
+        path=os.path.join(cfg.data_path, "train.npz"),
+        input_length_sequence=INPUT_SEQUENCE_LENGTH,
+        batch_size=cfg.batch_size,
     )
+    n_features = len(dl.dataset._data[0])
 
-    features, targets, time_index = prepare_training_tensors(sample)
-    _report_scene(scene_path, sample, features, targets, time_index)
+    if cfg.validation_interval is not None:
+        dl_valid = data_loader.get_data_loader_by_samples(
+            path=os.path.join(cfg.data_path, "valid.npz"),
+            input_length_sequence=INPUT_SEQUENCE_LENGTH,
+            batch_size=cfg.batch_size,
+        )
+        if len(dl_valid.dataset._data[0]) != n_features:
+            raise ValueError("`valid.npz` と `train.npz` の特徴数が一致していません。")
 
+    try:
+        while step < cfg.ntraining_steps:
+            for example in dl:
+                steps_per_epoch += 1
+
+                # ((position, particle_type, [material_property], n_particles_per_example), labels)
+                position = example[0][0].to(device)
+                particle_type = example[0][1].to(device)
+                if n_features == 3:
+                    material_property = example[0][2].to(device)
+                    n_particles_per_example = example[0][3].to(device)
+                elif n_features == 2:
+                    material_property = None
+                    n_particles_per_example = example[0][2].to(device)
+                else:
+                    raise NotImplementedError
+                labels = example[1].to(device)
+
+                # ランダムウォーク雑音（非運動学粒子のみ）
+                sampled_noise = noise_utils.get_random_walk_noise_for_position_sequence(
+                    position, noise_std_last_step=cfg.noise_std).to(device)
+                non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
+                sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
+
+                # 予測 & 教師（加速度）
+                pred_acc, target_acc = simulator.predict_accelerations(
+                    next_positions=labels,
+                    position_sequence_noise=sampled_noise,
+                    position_sequence=position,
+                    nparticles_per_example=n_particles_per_example,
+                    particle_types=particle_type,
+                    material_property=material_property
+                )
+
+                # （オプション）軽量バリデーション
+                if cfg.validation_interval is not None and step > 0 and step % cfg.validation_interval == 0:
+                    sampled_valid_example = next(iter(dl_valid))
+                    valid_loss = validation(simulator, sampled_valid_example, n_features, cfg, device)
+                    print(f"[valid @ step {step}] {valid_loss.item():.6f}")
+
+                # ロス → 逆伝播 → 更新
+                loss = acceleration_loss(pred_acc, target_acc, non_kinematic_mask)
+                train_loss = float(loss.item())
+                epoch_train_loss += train_loss
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                # 学習率を指数減衰で更新
+                lr_new = cfg.lr_init * (cfg.lr_decay ** (step / cfg.lr_decay_steps))
+                for g in optimizer.param_groups:
+                    g["lr"] = lr_new
+
+                print(f'epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e}', flush=True)
+
+                # 保存
+                if cfg.nsave_steps and step % cfg.nsave_steps == 0:
+                    save_model_and_train_state(simulator, cfg, step, epoch, optimizer,
+                                               train_loss, valid_loss, train_loss_hist, valid_loss_hist)
+
+                step += 1
+                if step >= cfg.ntraining_steps:
+                    break
+
+            # --- エポック終端処理 ---
+            if steps_per_epoch > 0:
+                epoch_avg = epoch_train_loss / steps_per_epoch
+            else:
+                epoch_avg = 0.0
+            train_loss_hist.append((epoch, float(epoch_avg)))
+
+            if cfg.validation_interval is not None:
+                sampled_valid_example = next(iter(dl_valid))
+                epoch_valid_loss = validation(simulator, sampled_valid_example, n_features, cfg, device)
+                valid_loss_hist.append((epoch, float(epoch_valid_loss.item())))
+                print(f'[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss.item():.6f}')
+            else:
+                print(f'[epoch {epoch}] train={epoch_avg:.6f}')
+
+            # リセット
+            epoch_train_loss = 0.0
+            steps_per_epoch = 0
+            epoch += 1
+
+            if step >= cfg.ntraining_steps:
+                break
+
+    except KeyboardInterrupt:
+        print("Interrupted. Saving last state...")
+
+    # 終了時に最終保存
+    save_model_and_train_state(simulator, cfg, step, epoch, optimizer,
+                               train_loss if 'train_loss' in locals() else None,
+                               valid_loss,
+                               train_loss_hist, valid_loss_hist)
+
+# -----------------------
+# エントリーポイント
+# -----------------------
+def main():
+    import argparse
+    p = argparse.ArgumentParser(description="GNS Runner (no DDP)")
+    p.add_argument("--config", "-c", default="config.yaml", help="Path to YAML config")
+    args = p.parse_args()
+
+    cfg = load_config(args.config)
+
+    # デバイス選択
+    if torch.cuda.is_available() and cfg.cuda_device_number is not None:
+        device = torch.device(f"cuda:{int(cfg.cuda_device_number)}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"device: {device}")
+
+    # 設定を保存（再現性のため）
+    os.makedirs(cfg.model_path, exist_ok=True)
+    with open(os.path.join(cfg.model_path, "used_config.json"), "w", encoding="utf-8") as f:
+        json.dump(_asjsonable_cfg(cfg), f, ensure_ascii=False, indent=2)
+
+    if cfg.mode == "train":
+        train(cfg, device)
+    elif cfg.mode in ("valid", "rollout"):
+        predict(cfg, device)
+    else:
+        raise ValueError(f"Unknown mode: {cfg.mode}")
 
 if __name__ == "__main__":
     main()

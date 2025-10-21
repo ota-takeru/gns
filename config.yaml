@@ -1,0 +1,25 @@
+mode: train            # train / valid / rollout
+data_path: ./data/     # train.npz / valid.npz / test.npz を置くディレクトリ
+model_path: ./models/  # モデルやtrain_stateの保存先
+output_path: ./rollouts/
+output_filename: rollout
+
+batch_size: 2
+noise_std: 0.00067
+
+# トレーニング
+ntraining_steps: 2000000
+validation_interval: null     # 例: 5000 にするとステップごとに簡易valid
+nsave_steps: 5000
+
+# 学習率（指数減衰）
+lr_init: 0.0001
+lr_decay: 0.1
+lr_decay_steps: 5000000
+
+# 再開関連（"latest" で自動復帰 / null なら新規）
+model_file: latest
+train_state_file: latest
+
+# GPU選択（null で自動）
+cuda_device_number: null
