@@ -12,10 +12,10 @@ import torch
 from tqdm import tqdm
 
 # --- gns モジュール群（あなたの環境のパスに応じて調整してください） ---
-from gns import learned_simulator
-from gns import noise_utils
-from gns import reading_utils
-from gns import data_loader
+import learned_simulator
+import noise_utils
+import reading_utils
+import data_loader
 
 # -----------------------
 # 設定
@@ -72,17 +72,13 @@ def optimizer_to(optim: torch.optim.Optimizer, device: torch.device):
 
 def acceleration_loss(pred_acc: torch.Tensor,
                       target_acc: torch.Tensor,
-                      non_kinematic_mask: torch.Tensor) -> torch.Tensor:
-    """
-    加速度MSE（非運動学粒子のみ）
-    pred_acc, target_acc: (..., N, D)
-    non_kinematic_mask: (N,)
-    """
+                      non_kinematic_mask: torch.Tensor  #学習に用いる粒子がtrue
+                      ) -> torch.Tensor: #加速度のロス計算
     loss = (pred_acc - target_acc) ** 2
     loss = loss.sum(dim=-1)  # D 次元を和
-    num_non_kinematic = non_kinematic_mask.sum()
-    masked = torch.where(non_kinematic_mask.bool(), loss, torch.zeros_like(loss))
-    return masked.sum() / num_non_kinematic.clamp(min=1)
+    num_non_kinematic = non_kinematic_mask.sum() #学習に用いる粒子数
+    masked = torch.where(non_kinematic_mask.bool(), loss, torch.zeros_like(loss))   #学習に用いる粒子のみロスを考慮
+    return masked.sum() / num_non_kinematic.clamp(min=1)                    #平均を取る（clampはゼロ除算防止）
 
 def save_model_and_train_state(simulator: learned_simulator.LearnedSimulator,
                                cfg: Config,
@@ -482,7 +478,7 @@ def train(cfg: Config, device: torch.device):
 
                 # ロス → 逆伝播 → 更新
                 loss = acceleration_loss(pred_acc, target_acc, non_kinematic_mask)
-                train_loss = float(loss.item())
+                train_loss = float(loss.item()) 
                 epoch_train_loss += train_loss
 
                 optimizer.zero_grad()
