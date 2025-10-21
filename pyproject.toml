@@ -9,4 +9,61 @@ dependencies = [
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
     "pymunk>=7.1.0",
+    "ruff>=0.14.1",
+    "torch-geometric>=2.7.0",
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+ignore = [
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D107",
+    "D400",
+    "D415",
+    "D203",
+    "D213",
+    "COM812",
+    "ISC001",
+    "ANN201",
+    "S101",
+    "T201",
+    "RET504",
+    "PLR0913",
+]
+select = ["ALL"]
+
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
