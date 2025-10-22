@@ -325,7 +325,7 @@ def main(out_dir: Optional[Union[Path, str]] = None):
     print(f"Generating {num_train_scenes} training scenes...")
     for i in range(num_train_scenes):
         pos, rigid_ids, meta = generate_scene()
-        save_npz(out_root, i, pos, rigid_ids, meta, split=split)
+        save_npz(out_dir, i, pos, rigid_ids, meta, split=split)
         # 全粒子を保持し、粒子タイプを割り当て
         all_pos, particle_types = _extract_all_positions_with_types(
             pos, rigid_ids, meta["nb"]
@@ -336,11 +336,11 @@ def main(out_dir: Optional[Union[Path, str]] = None):
 
     if trajectories and last_meta is not None:
         dataset_path, meta_path = export_dataset(
-            trajectories, particle_types_list, out_root, split=split, dt=last_meta["dt"]
+            trajectories, particle_types_list, out_dir, split=split, dt=last_meta["dt"]
         )
         print(f"Saved train dataset to {dataset_path}")
         print(f"Wrote metadata to {meta_path}")
-    print(f"Generated {num_train_scenes} scenes in {out_root / split}")
+    print(f"Generated {num_train_scenes} scenes in {out_dir / split}")
 
     # Valid データセットの生成
     num_valid_scenes = 500  # 検証シーン数
@@ -351,7 +351,7 @@ def main(out_dir: Optional[Union[Path, str]] = None):
     print(f"\nGenerating {num_valid_scenes} validation scenes...")
     for i in range(num_valid_scenes):
         pos, rigid_ids, meta = generate_scene()
-        save_npz(out_root, i, pos, rigid_ids, meta, split=split)
+        save_npz(out_dir, i, pos, rigid_ids, meta, split=split)
         # 全粒子を保持し、粒子タイプを割り当て
         all_pos, particle_types = _extract_all_positions_with_types(
             pos, rigid_ids, meta["nb"]
@@ -362,10 +362,10 @@ def main(out_dir: Optional[Union[Path, str]] = None):
 
     if trajectories and last_meta is not None:
         dataset_path, _ = export_dataset(
-            trajectories, particle_types_list, out_root, split=split, dt=last_meta["dt"]
+            trajectories, particle_types_list, out_dir, split=split, dt=last_meta["dt"]
         )
         print(f"Saved valid dataset to {dataset_path}")
-    print(f"Generated {num_valid_scenes} scenes in {out_root / split}")
+    print(f"Generated {num_valid_scenes} scenes in {out_dir / split}")
 
 
 if __name__ == "__main__":
