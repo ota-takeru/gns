@@ -2,6 +2,8 @@ import json
 import math
 import random
 from pathlib import Path
+from typing import Optional, Union
+
 import numpy as np
 import pymunk
 
@@ -18,7 +20,7 @@ def make_space(g=(0.0, -9.81)):
 def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
     """壁を剛体として追加（粒子表現のため）- STATICボディとして固定"""
     walls = []
-    
+
     # 床 - STATIC bodyとして作成（完全に固定）
     floor_body = pymunk.Body(body_type=pymunk.Body.STATIC)
     floor_body.position = (0, 0)
@@ -27,7 +29,7 @@ def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
     floor_shape.elasticity = 0.0
     space.add(floor_body, floor_shape)
     walls.append((floor_body, floor_shape))
-    
+
     # 左壁 - STATIC bodyとして作成（完全に固定）
     left_body = pymunk.Body(body_type=pymunk.Body.STATIC)
     left_body.position = (0, 0)
@@ -36,7 +38,7 @@ def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
     left_shape.elasticity = 0.0
     space.add(left_body, left_shape)
     walls.append((left_body, left_shape))
-    
+
     # 右壁 - STATIC bodyとして作成（完全に固定）
     right_body = pymunk.Body(body_type=pymunk.Body.STATIC)
     right_body.position = (0, 0)
@@ -45,7 +47,7 @@ def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
     right_shape.elasticity = 0.0
     space.add(right_body, right_shape)
     walls.append((right_body, right_shape))
-    
+
     return walls
 
 
@@ -121,7 +123,7 @@ def generate_scene(T=240, dt=1 / 120, substeps=4, n_bodies=(2, 5), density=16):
         b, s = add_random_rigid(space)
         bodies.append(b)
         local_pts.append(sample_points_on_shape(s, density=density))
-    
+
     # 壁も剛体として扱う
     wall_bodies = []
     wall_local_pts = []
@@ -132,14 +134,14 @@ def generate_scene(T=240, dt=1 / 120, substeps=4, n_bodies=(2, 5), density=16):
     # 全剛体をentriesに追加（落下する物体 + 壁）
     entries = []
     N = 0
-    
+
     # 落下する剛体
     for rigid_idx, (body, pts_local) in enumerate(zip(bodies, local_pts)):
         if len(pts_local) == 0:
             continue
         entries.append((body, pts_local, rigid_idx))
         N += len(pts_local)
-    
+
     # 壁の剛体
     for wall_idx, (wall_body, pts_local) in enumerate(zip(wall_bodies, wall_local_pts)):
         if len(pts_local) == 0:
@@ -171,7 +173,7 @@ def generate_scene(T=240, dt=1 / 120, substeps=4, n_bodies=(2, 5), density=16):
     # 壁の粒子数を計算
     wall_particles = sum(len(pts) for pts in wall_local_pts)
     dynamic_particles = N - wall_particles
-    
+
     meta = dict(
         seed=42,
         nb=len(bodies),  # 落下する剛体の数
@@ -255,7 +257,7 @@ def _estimate_connectivity_radius(trajectories):
 
 def export_dataset(trajectories, particle_types_list, out_dir, split, dt):
     """Save aggregated dataset compatible with data_loader along with metadata.
-    
+
     Note: We store particle_types as an array per trajectory to support mixed types
     (dynamic and kinematic particles in the same scene).
     """
@@ -275,7 +277,9 @@ def export_dataset(trajectories, particle_types_list, out_dir, split, dt):
     vel_mean, vel_std, acc_mean, acc_std = _collect_statistics(trajectories)
     dim = int(trajectories[0].shape[-1])
     input_sequence_length = 6  # Must match INPUT_SEQUENCE_LENGTH in training.
-    particle_type_embedding = 16  # Must match particle_type_embedding_size in simulator.
+    particle_type_embedding = (
+        16  # Must match particle_type_embedding_size in simulator.
+    )
     velocity_feature_dim = dim * (input_sequence_length - 1)
     metadata = {
         "dim": int(trajectories[0].shape[-1]),
@@ -309,9 +313,9 @@ def save_npz(out_dir, scene_idx, positions, rigid_ids, meta, split="train"):
     return path
 
 
-if __name__ == "__main__":
-    out_root = Path(__file__).resolve().parents[1] / "out"
-    
+def main(out_dir: Optional[Union[Path, str]] = None):
+    out_dir = Path(out_dir) if out_dir is not None else Path("out")
+
     # Train データセットの生成
     num_train_scenes = 5000  # 訓練シーン数（テスト用に少なく）
     split = "train"
@@ -323,7 +327,9 @@ if __name__ == "__main__":
         pos, rigid_ids, meta = generate_scene()
         save_npz(out_root, i, pos, rigid_ids, meta, split=split)
         # 全粒子を保持し、粒子タイプを割り当て
-        all_pos, particle_types = _extract_all_positions_with_types(pos, rigid_ids, meta["nb"])
+        all_pos, particle_types = _extract_all_positions_with_types(
+            pos, rigid_ids, meta["nb"]
+        )
         trajectories.append(all_pos)
         particle_types_list.append(particle_types)
         last_meta = meta
@@ -335,7 +341,7 @@ if __name__ == "__main__":
         print(f"Saved train dataset to {dataset_path}")
         print(f"Wrote metadata to {meta_path}")
     print(f"Generated {num_train_scenes} scenes in {out_root / split}")
-    
+
     # Valid データセットの生成
     num_valid_scenes = 500  # 検証シーン数
     split = "valid"
@@ -347,7 +353,9 @@ if __name__ == "__main__":
         pos, rigid_ids, meta = generate_scene()
         save_npz(out_root, i, pos, rigid_ids, meta, split=split)
         # 全粒子を保持し、粒子タイプを割り当て
-        all_pos, particle_types = _extract_all_positions_with_types(pos, rigid_ids, meta["nb"])
+        all_pos, particle_types = _extract_all_positions_with_types(
+            pos, rigid_ids, meta["nb"]
+        )
         trajectories.append(all_pos)
         particle_types_list.append(particle_types)
         last_meta = meta
@@ -358,3 +366,7 @@ if __name__ == "__main__":
         )
         print(f"Saved valid dataset to {dataset_path}")
     print(f"Generated {num_valid_scenes} scenes in {out_root / split}")
+
+
+if __name__ == "__main__":
+    main()
