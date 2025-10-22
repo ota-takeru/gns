@@ -35,6 +35,7 @@ class Config:
 
     batch_size: int = 2
     noise_std: float = 6.7e-4
+    log_interval: int = 1000
 
     ntraining_steps: int = int(2e7)
     validation_interval: int | None = None
@@ -132,6 +133,7 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "output_filename": cfg.output_filename,
         "batch_size": cfg.batch_size,
         "noise_std": cfg.noise_std,
+        "log_interval": cfg.log_interval,
         "ntraining_steps": cfg.ntraining_steps,
         "validation_interval": cfg.validation_interval,
         "nsave_steps": cfg.nsave_steps,
@@ -415,6 +417,8 @@ def train(cfg: Config, device: torch.device):
     simulator.to(device)
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
 
+    log_interval = max(1, int(cfg.log_interval))
+
     # 進捗状態
     step = 0
     epoch = 0
@@ -548,10 +552,10 @@ def train(cfg: Config, device: torch.device):
                 for g in optimizer.param_groups:
                     g["lr"] = lr_new
 
-                print(
-                    f"epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e}",
-                    flush=True,
-                )
+                if step % log_interval == 0:
+                    print(
+                        f"epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e}"
+                    )
 
                 # 保存
                 if cfg.nsave_steps and step % cfg.nsave_steps == 0:
