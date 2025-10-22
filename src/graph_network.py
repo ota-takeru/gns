@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch import nn
 from torch_geometric.nn import MessagePassing
@@ -7,7 +9,7 @@ from torch_geometric.nn import MessagePassing
 def build_mlp(
     input_size: int,
     hidden_layer_sizes: list[int],
-    output_size: int | None = None,
+    output_size: Optional[int] = None,
     output_activation: type[nn.Module] = nn.Identity,
     activation: type[nn.Module] = nn.ReLU,
 ) -> nn.Sequential:
@@ -114,7 +116,11 @@ class InteractionNetwork(MessagePassing):
         edge_residual = edge_features  # 残差接続のために元のエッジ特徴量を保存
 
         # message → aggregate → update の順にメソッドを自動で実行
-        x, edge_features = self.propagate(edge_index, x=x, edge_features=edge_features)
+        self._edge_features = None
+        x = self.propagate(edge_index, x=x, edge_attr=edge_features)
+        if self._edge_features is None:
+            raise RuntimeError("edge features were not computed during message passing.")
+        edge_features = self._edge_features
         x += x_residual  # ノード特徴量に残差接続を追加
         edge_features += edge_residual  # エッジ特徴量に残差接続を追加
         return x, edge_features
@@ -123,8 +129,8 @@ class InteractionNetwork(MessagePassing):
     def message(
         self,
         x_j: torch.Tensor,
-        x_i: torch.Tensor | None = None,
-        edge_attr: torch.Tensor | None = None,
+        x_i: Optional[torch.Tensor] = None,
+        edge_attr: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if x_i is None:
             msg = "x_i is required"
@@ -141,7 +147,7 @@ class InteractionNetwork(MessagePassing):
     def update(
         self,
         inputs: torch.Tensor,  # ← PyGはここに集約後を渡す(aggr_out)
-        x: torch.Tensor | None = None,  # ← もとのノード特徴を任意で受ける
+        x: Optional[torch.Tensor] = None,  # ← もとのノード特徴を任意で受ける
     ) -> torch.Tensor:
         if x is None:
             msg = "x is required"

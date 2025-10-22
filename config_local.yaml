@@ -1,0 +1,21 @@
+mode: train
+data_path: ./datasets/out/
+model_path: ./models/test_run/
+output_path: ./rollouts/test_run/
+output_filename: rollout
+
+batch_size: 2
+noise_std: 0.00067
+
+ntraining_steps: 100
+validation_interval: null
+nsave_steps: 50
+
+lr_init: 0.0001
+lr_decay: 0.1
+lr_decay_steps: 1000
+
+model_file: null
+train_state_file: null
+
+cuda_device_number: null

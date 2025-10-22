@@ -1,0 +1,4 @@
+{
+  "python.analysis.extraPaths": ["./venv/Lib/site-packages"],
+  "cursorpyright.analysis.extraPaths": ["./venv/Lib/site-packages"]
+}

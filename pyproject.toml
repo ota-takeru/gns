@@ -9,10 +9,12 @@ dependencies = [
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
     "pymunk>=7.1.0",
+    "pyyaml>=6.0.2",
     "ruff>=0.14.1",
     "torch-geometric>=2.7.0",
     "torch>=2.7.0",
     "torchvision>=0.22.0",
+    "tqdm>=4.67.1",
 ]
 
 [dependency-groups]
@@ -48,6 +50,7 @@ ignore = [
     "D400",
     "D415",
     "D203",
+    "D205",
     "D213",
     "COM812",
     "ISC001",
@@ -56,6 +59,7 @@ ignore = [
     "T201",
     "RET504",
     "PLR0913",
+    "ERR403",
 ]
 select = ["ALL"]
 
@@ -67,3 +71,6 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = "dynamic"
+
+[tool.mypy]
+ignore_missing_imports = true

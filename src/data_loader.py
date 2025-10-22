@@ -1,219 +1,233 @@
-import json
-from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional, Sequence, Tuple, Union
-
 import numpy as np
-
-ArrayLike = Union[np.ndarray, Sequence[float]]
-
-
-class NormalizationStats(NamedTuple):
-    mean: np.ndarray
-    std: np.ndarray
+import torch
 
 
-class GNSDataSample(NamedTuple):
-    """Container for one scene worth of preprocessed arrays."""
-
-    positions: np.ndarray  # (T, N, D)
-    velocities: np.ndarray  # (T, N, D)
-    accelerations: np.ndarray  # (T, N, D)
-    noisy_positions: np.ndarray  # (T, N, D)
-    noise: np.ndarray  # (T, N, D)
-    rigid_id: np.ndarray  # (N,)
-    dt: float
-    meta: Dict[str, Any]
-    valid_targets: np.ndarray  # (T,) bool mask where derivatives are reliable
-    normalizers: Dict[str, NormalizationStats]
+def load_npz_data(path):
+    with np.load(path, allow_pickle=True) as data_file:
+        if "gns_data" in data_file:
+            data = data_file["gns_data"]
+        else:
+            data = [item for _, item in data_file.items()]
+    return data
 
 
-def _ensure_path(path: Union[str, Path]) -> Path:
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(path)
-    if path.suffix != ".npz":
-        raise ValueError(f"Expected .npz file, got {path}")
-    return path
+class SamplesDataset(torch.utils.data.Dataset):
+    def __init__(self, path, input_length_sequence):
+        super().__init__()
+        # load dataset stored in npz format
+        # data is loaded as dict of tuples
+        # of the form (positions, particle_type)
+        # convert to list of tuples
+        # TODO: allow_pickle=True is potential security risk. See docs.
+        self._data = load_npz_data(path)
+
+        # length of each trajectory in the dataset
+        # excluding the input_length_sequence
+        # may (and likely is) variable between data
+        self._dimension = self._data[0][0].shape[-1]
+        self._input_length_sequence = input_length_sequence
+        self._material_property_as_feature = True if len(self._data[0]) >= 3 else False
+        if self._material_property_as_feature:  # if raw data includes material_property
+            self._data_lengths = [
+                x.shape[0] - self._input_length_sequence for x, _, _ in self._data
+            ]
+        else:
+            self._data_lengths = [
+                x.shape[0] - self._input_length_sequence for x, _ in self._data
+            ]
+        self._length = sum(self._data_lengths)
+
+        # pre-compute cumulative lengths
+        # to allow fast indexing in __getitem__
+        self._precompute_cumlengths = [
+            sum(self._data_lengths[:x]) for x in range(1, len(self._data_lengths) + 1)
+        ]
+        self._precompute_cumlengths = np.array(self._precompute_cumlengths, dtype=int)
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, idx):
+        # Select the trajectory immediately before
+        # the one that exceeds the idx
+        # (i.e., the one in which idx resides).
+        trajectory_idx = np.searchsorted(
+            np.array(self._precompute_cumlengths) - 1, idx, side="left"
+        )
+
+        # Compute index of pick along time-dimension of trajectory.
+        start_of_selected_trajectory = (
+            self._precompute_cumlengths[trajectory_idx - 1]
+            if trajectory_idx != 0
+            else 0
+        )
+        time_idx = self._input_length_sequence + (idx - start_of_selected_trajectory)
+
+        # Prepare training data.
+        positions = self._data[trajectory_idx][0][
+            time_idx - self._input_length_sequence : time_idx
+        ]
+        positions = np.transpose(
+            positions, (1, 0, 2)
+        )  # nparticles, input_sequence_length, dimension
+        
+        #  particle_type = np.full(
+        #     positions.shape[0], self._data[trajectory_idx]
+        #     [1], dtype=int
+        # )
+        # Handle particle_type: can be either a single value or an array
+        _particle_type = self._data[trajectory_idx][1]
+        if isinstance(_particle_type, (int, np.integer)):
+            # Single value: all particles have the same type
+            particle_type = np.full(positions.shape[0], _particle_type, dtype=int)
+        else:
+            # Array: each particle has its own type
+            particle_type = np.array(_particle_type, dtype=int)
+        
+        n_particles_per_example = positions.shape[0]
+        label = self._data[trajectory_idx][0][time_idx]
+
+        if self._material_property_as_feature:  # if raw data includes material_property
+            material_property = np.full(
+                positions.shape[0], self._data[trajectory_idx][2], dtype=float
+            )
+            training_example = (
+                (positions, particle_type, material_property, n_particles_per_example),
+                label,
+            )
+        else:
+            training_example = (
+                (positions, particle_type, n_particles_per_example),
+                label,
+            )
+
+        return training_example
 
 
-def _parse_meta(meta_arr: np.ndarray) -> Dict[str, Any]:
-    if meta_arr.ndim == 0:
-        raw = meta_arr.item()
+def collate_fn(data):
+    material_property_as_feature = True if len(data[0][0]) >= 4 else False
+    position_list = []
+    particle_type_list = []
+    material_property_list = []  # Always initialize to avoid unbound error
+    n_particles_per_example_list = []
+    label_list = []
+
+    if material_property_as_feature:
+        for (
+            positions,
+            particle_type,
+            material_property,
+            n_particles_per_example,
+        ), label in data:
+            position_list.append(positions)
+            particle_type_list.append(particle_type)
+            material_property_list.append(material_property)
+            n_particles_per_example_list.append(n_particles_per_example)
+            label_list.append(label)
     else:
-        raw = meta_arr[0]
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-    return {"raw_meta": raw}
+        for (positions, particle_type, n_particles_per_example), label in data:
+            position_list.append(positions)
+            particle_type_list.append(particle_type)
+            n_particles_per_example_list.append(n_particles_per_example)
+            label_list.append(label)
 
-
-def _central_difference(arr: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Return derivative and validity mask for central difference along axis 0."""
-    deriv = np.zeros_like(arr)
-    t_steps = arr.shape[0]
-    valid = np.zeros((t_steps,), dtype=bool)
-    if t_steps < 2:
-        return deriv, valid
-
-    # Forward/backward difference at boundaries
-    deriv[0] = (arr[1] - arr[0]) / dt
-    deriv[-1] = (arr[-1] - arr[-2]) / dt
-    valid[[0, t_steps - 1]] = True
-
-    if t_steps >= 3:
-        mid = (arr[2:] - arr[:-2]) / (2.0 * dt)
-        deriv[1:-1] = mid
-        valid[1:-1] = True
-
-    return deriv, valid
-
-
-def _prepare_noise(
-    shape: Tuple[int, ...],
-    scale: ArrayLike,
-    rng: Optional[np.random.Generator],
-    dtype: np.dtype,
-) -> np.ndarray:
-    if rng is None:
-        rng = np.random.default_rng()
-    scale_arr = np.asarray(scale, dtype=dtype)
-    if scale_arr.ndim == 0:
-        scale_arr = np.full((shape[-1],), float(scale_arr), dtype=dtype)
+    if material_property_as_feature:
+        collated_data = (
+            (
+                torch.tensor(np.vstack(position_list)).to(torch.float32).contiguous(),
+                torch.tensor(np.concatenate(particle_type_list)).contiguous(),
+                torch.tensor(np.concatenate(material_property_list))
+                .to(torch.float32)
+                .contiguous(),
+                torch.tensor(n_particles_per_example_list).contiguous(),
+            ),
+            torch.tensor(np.vstack(label_list)).to(torch.float32).contiguous(),
+        )
     else:
-        scale_arr = np.broadcast_to(scale_arr, (shape[-1],)).astype(dtype, copy=False)
-    noise = rng.normal(loc=0.0, scale=1.0, size=shape).astype(dtype, copy=False)
-    broadcast_shape = (1,) * (noise.ndim - 1) + (scale_arr.shape[0],)
-    noise *= scale_arr.reshape(broadcast_shape)
-    return noise
+        collated_data = (
+            (
+                torch.tensor(np.vstack(position_list)).to(torch.float32).contiguous(),
+                torch.tensor(np.concatenate(particle_type_list)).contiguous(),
+                torch.tensor(n_particles_per_example_list).contiguous(),
+            ),
+            torch.tensor(np.vstack(label_list)).to(torch.float32).contiguous(),
+        )
+
+    return collated_data
 
 
-def _compute_normalizer(
-    arr: np.ndarray,
-    axis: Tuple[int, ...],
-    eps: float = 1e-6,
-) -> NormalizationStats:
-    mean = arr.mean(axis=axis).astype(np.float32, copy=True)
-    std = arr.std(axis=axis).astype(np.float32, copy=True)
-    std = np.where(std < eps, 1.0, std)
-    return NormalizationStats(mean=mean, std=std)
+class TrajectoriesDataset(torch.utils.data.Dataset):
+    def __init__(self, path):
+        super().__init__()
+        # load dataset stored in npz format
+        # data is loaded as dict of tuples
+        # of the form (positions, particle_type)
+        # convert to list of tuples
+        # TODO (jpv): allow_pickle=True is potential security risk. See docs.
+        self._data = load_npz_data(path)
+        self._dimension = self._data[0][0].shape[-1]
+        self._length = len(self._data)
+        self._material_property_as_feature = True if len(self._data[0]) >= 3 else False
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, idx):
+        if self._material_property_as_feature:
+            positions, _particle_type, _material_property = self._data[idx]
+            positions = np.transpose(positions, (1, 0, 2))
+            
+            # Handle particle_type: can be either a single value or an array
+            if isinstance(_particle_type, (int, np.integer)):
+                particle_type = np.full(positions.shape[0], _particle_type, dtype=int)
+            else:
+                particle_type = np.array(_particle_type, dtype=int)
+            
+            material_property = np.full(
+                positions.shape[0], _material_property, dtype=float
+            )
+            n_particles_per_example = positions.shape[0]
+
+            trajectory = (
+                torch.tensor(positions).to(torch.float32).contiguous(),
+                torch.tensor(particle_type).contiguous(),
+                torch.tensor(material_property).to(torch.float32).contiguous(),
+                n_particles_per_example,
+            )
+        else:
+            positions, _particle_type = self._data[idx]
+            positions = np.transpose(positions, (1, 0, 2))
+            
+            # Handle particle_type: can be either a single value or an array
+            if isinstance(_particle_type, (int, np.integer)):
+                particle_type = np.full(positions.shape[0], _particle_type, dtype=int)
+            else:
+                particle_type = np.array(_particle_type, dtype=int)
+            
+            n_particles_per_example = positions.shape[0]
+
+            trajectory = (
+                torch.tensor(positions).to(torch.float32).contiguous(),
+                torch.tensor(particle_type).contiguous(),
+                n_particles_per_example,
+            )
+
+        return trajectory
 
 
-def _apply_normalizer(arr: np.ndarray, stats: NormalizationStats) -> np.ndarray:
-    target_shape = (1,) * (arr.ndim - 1) + (arr.shape[-1],)
-    mean = stats.mean.reshape(target_shape).astype(np.float32, copy=False)
-    std = stats.std.reshape(target_shape).astype(np.float32, copy=False)
-    arr = arr.astype(np.float32, copy=True)
-    return (arr - mean) / std
-
-
-def load_gns_scene(
-    npz_path: Union[str, Path],
-    noise_std: ArrayLike = 0.0,
-    noise_clip: Optional[float] = None,
-    seed: Optional[int] = None,
-    normalize: bool = True,
-) -> GNSDataSample:
-    """Load and preprocess one npz scene for GNS training/evaluation.
-
-    Parameters
-    ----------
-    npz_path:
-        Path to a compressed numpy archive produced by dataset generation.
-    noise_std:
-        Standard deviation of Gaussian noise added to positions. Can be a scalar
-        or per-dimension sequence. Set to 0.0 to disable noise augmentation.
-    noise_clip:
-        Optional absolute clip value applied to sampled noise before adding it.
-        Useful to avoid extreme perturbations.
-    seed:
-        Optional random seed for deterministic noise generation.
-    normalize:
-        Whether to standardize positions, velocities, and accelerations to zero
-        mean and unit variance (computed per-scene across particles and time).
-        Normalization statistics are returned alongside the sample.
-    """
-
-    path = _ensure_path(npz_path)
-    with np.load(path) as data:
-        positions = data["position"].astype(np.float32, copy=True)
-        rigid_id = data["rigid_id"].astype(np.int32, copy=False)
-        meta = _parse_meta(data["meta"])
-
-    dt = float(meta.get("dt", 1.0))
-    rng = np.random.default_rng(seed)
-
-    velocities, vel_valid = _central_difference(positions, dt)
-    accelerations, acc_valid = _central_difference(velocities, dt)
-
-    scale = np.asarray(noise_std, dtype=np.float32)
-    use_noise = scale.size > 0 and np.any(scale != 0.0)
-    if use_noise:
-        noise = _prepare_noise(positions.shape, scale, rng, positions.dtype)
-    else:
-        noise = np.zeros_like(positions)
-
-    if noise_clip is not None and noise_clip > 0:
-        noise = np.clip(noise, -noise_clip, noise_clip)
-
-    noisy_positions = positions + noise
-
-    valid_targets = vel_valid & acc_valid
-
-    stats_axes = (0, 1)
-    pos_stats = _compute_normalizer(positions, stats_axes)
-    vel_stats = _compute_normalizer(velocities, stats_axes)
-    acc_stats = _compute_normalizer(accelerations, stats_axes)
-
-    normalizers = {
-        "position": pos_stats,
-        "velocity": vel_stats,
-        "acceleration": acc_stats,
-    }
-
-    if normalize:
-        positions = _apply_normalizer(positions, pos_stats)
-        velocities = _apply_normalizer(velocities, vel_stats)
-        accelerations = _apply_normalizer(accelerations, acc_stats)
-        noisy_positions = _apply_normalizer(noisy_positions, pos_stats)
-        noise = noisy_positions - positions
-    else:
-        positions = positions.astype(np.float32, copy=False)
-        velocities = velocities.astype(np.float32, copy=False)
-        accelerations = accelerations.astype(np.float32, copy=False)
-        noisy_positions = noisy_positions.astype(np.float32, copy=False)
-        noise = noise.astype(np.float32, copy=False)
-
-    return GNSDataSample(
-        positions=positions,
-        velocities=velocities,
-        accelerations=accelerations,
-        noisy_positions=noisy_positions,
-        noise=noise,
-        rigid_id=rigid_id,
-        dt=dt,
-        meta=meta,
-        valid_targets=valid_targets,
-        normalizers=normalizers,
+def get_data_loader_by_samples(path, input_length_sequence, batch_size, shuffle=True):
+    dataset = SamplesDataset(path, input_length_sequence)
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        pin_memory=True,
+        collate_fn=collate_fn,
     )
 
 
-def load_gns_dataset(
-    directory: Union[str, Path],
-    pattern: str = "scene_*.npz",
-    normalize: bool = True,
-    **kwargs: Any,
-) -> Tuple[GNSDataSample, ...]:
-    """Load all npz scenes under the given directory matching a glob pattern."""
-    dir_path = Path(directory)
-    if not dir_path.exists():
-        raise FileNotFoundError(dir_path)
-
-    samples = []
-    for file_path in sorted(dir_path.glob(pattern)):
-        samples.append(load_gns_scene(file_path, normalize=normalize, **kwargs))
-
-    return tuple(samples)
+def get_data_loader_by_trajectories(path):
+    dataset = TrajectoriesDataset(path)
+    return torch.utils.data.DataLoader(
+        dataset, batch_size=None, shuffle=False, pin_memory=True
+    )
