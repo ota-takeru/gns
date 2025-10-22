@@ -317,7 +317,7 @@ def main(out_dir: Optional[Union[Path, str]] = None):
     out_dir = Path(out_dir) if out_dir is not None else Path("out")
 
     # Train データセットの生成
-    num_train_scenes = 5000  # 訓練シーン数（テスト用に少なく）
+    num_train_scenes = 1000  # 訓練シーン数（テスト用に少なく）
     split = "train"
     trajectories = []
     particle_types_list = []
@@ -343,7 +343,7 @@ def main(out_dir: Optional[Union[Path, str]] = None):
     print(f"Generated {num_train_scenes} scenes in {out_dir / split}")
 
     # Valid データセットの生成
-    num_valid_scenes = 500  # 検証シーン数
+    num_valid_scenes = 100  # 検証シーン数
     split = "valid"
     trajectories = []
     particle_types_list = []
