@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import time
 
 import torch
 import yaml
@@ -144,6 +145,17 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "train_state_file": cfg.train_state_file,
         "cuda_device_number": cfg.cuda_device_number,
     }
+
+
+def _format_eta(seconds: float) -> str:
+    """秒を人間が読みやすい ETA 文字列に整形 (H:MM:SS or MM:SS)。"""
+    sec = int(max(0, seconds))
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h > 0:
+        return f"{h:d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 
 # -----------------------
@@ -479,6 +491,11 @@ def train(cfg: Config, device: torch.device):
     )
     n_features = len(dl.dataset[0])
 
+    # ETA 用タイミング管理（軽量）
+    train_start_time = time.perf_counter()
+    ema_step_time: float | None = None
+    steps_counted_for_eta = 0
+
     validation_interval = cfg.validation_interval
     dl_valid = None
     if validation_interval is not None:
@@ -494,6 +511,7 @@ def train(cfg: Config, device: torch.device):
     try:
         while step < cfg.ntraining_steps:
             for example in dl:
+                step_tic = time.perf_counter()
                 steps_per_epoch += 1
                 # ((position, particle_type, [material_property], n_particles_per_example), labels)
                 position = example[0][0].to(device)
@@ -552,9 +570,26 @@ def train(cfg: Config, device: torch.device):
                 for g in optimizer.param_groups:
                     g["lr"] = lr_new
 
+                # 1 ステップ時間を EMA で更新（軽量）
+                step_duration = time.perf_counter() - step_tic
+                if ema_step_time is None:
+                    ema_step_time = step_duration
+                else:
+                    alpha = 0.05  # 平滑化係数（小さいほど滑らか・低コスト）
+                    ema_step_time = alpha * step_duration + (1 - alpha) * ema_step_time
+                steps_counted_for_eta += 1
+
                 if step % log_interval == 0:
+                    remaining_steps = max(0, cfg.ntraining_steps - max(0, step))
+                    if ema_step_time is not None and steps_counted_for_eta > 0:
+                        eta_sec = remaining_steps * ema_step_time
+                    else:
+                        elapsed = time.perf_counter() - train_start_time
+                        avg = elapsed / max(1, steps_counted_for_eta)
+                        eta_sec = remaining_steps * avg
+                    eta_str = _format_eta(eta_sec)
                     print(
-                        f"epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e}"
+                        f"epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e} eta={eta_str}"
                     )
 
                 # 保存
