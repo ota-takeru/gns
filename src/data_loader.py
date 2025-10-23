@@ -12,7 +12,7 @@ def load_npz_data(path):
 
 
 class SamplesDataset(torch.utils.data.Dataset):
-    def __init__(self, path, input_length_sequence):
+    def __init__(self, path, input_length_sequence, limit_scenes: int | None = None):
         super().__init__()
         # load dataset stored in npz format
         # data is loaded as dict of tuples
@@ -20,6 +20,13 @@ class SamplesDataset(torch.utils.data.Dataset):
         # convert to list of tuples
         # TODO: allow_pickle=True is potential security risk. See docs.
         self._data = load_npz_data(path)
+        if limit_scenes is not None:
+            try:
+                limit = int(limit_scenes)
+                if limit > 0:
+                    self._data = self._data[:limit]
+            except Exception:
+                pass
 
         # length of each trajectory in the dataset
         # excluding the input_length_sequence
@@ -157,7 +164,7 @@ def collate_fn(data):
 
 
 class TrajectoriesDataset(torch.utils.data.Dataset):
-    def __init__(self, path):
+    def __init__(self, path, limit_scenes: int | None = None):
         super().__init__()
         # load dataset stored in npz format
         # data is loaded as dict of tuples
@@ -165,6 +172,13 @@ class TrajectoriesDataset(torch.utils.data.Dataset):
         # convert to list of tuples
         # TODO (jpv): allow_pickle=True is potential security risk. See docs.
         self._data = load_npz_data(path)
+        if limit_scenes is not None:
+            try:
+                limit = int(limit_scenes)
+                if limit > 0:
+                    self._data = self._data[:limit]
+            except Exception:
+                pass
         self._dimension = self._data[0][0].shape[-1]
         self._length = len(self._data)
         self._material_property_as_feature = True if len(self._data[0]) >= 3 else False
@@ -215,19 +229,49 @@ class TrajectoriesDataset(torch.utils.data.Dataset):
         return trajectory
 
 
-def get_data_loader_by_samples(path, input_length_sequence, batch_size, shuffle=True):
-    dataset = SamplesDataset(path, input_length_sequence)
-    return torch.utils.data.DataLoader(
-        dataset,
+def get_data_loader_by_samples(
+    path,
+    input_length_sequence,
+    batch_size,
+    shuffle=True,
+    *,
+    num_workers: int = 0,
+    pin_memory: bool = True,
+    persistent_workers: bool = False,
+    prefetch_factor: int | None = None,
+    limit_scenes: int | None = None,
+):
+    dataset = SamplesDataset(path, input_length_sequence, limit_scenes=limit_scenes)
+    kwargs = dict(
         batch_size=batch_size,
         shuffle=shuffle,
-        pin_memory=True,
+        pin_memory=pin_memory,
         collate_fn=collate_fn,
+        num_workers=max(0, int(num_workers)),
+        persistent_workers=bool(persistent_workers) if num_workers > 0 else False,
     )
+    if prefetch_factor is not None and num_workers > 0:
+        kwargs["prefetch_factor"] = int(prefetch_factor)
+    return torch.utils.data.DataLoader(dataset, **kwargs)
 
 
-def get_data_loader_by_trajectories(path):
-    dataset = TrajectoriesDataset(path)
-    return torch.utils.data.DataLoader(
-        dataset, batch_size=None, shuffle=False, pin_memory=True
+def get_data_loader_by_trajectories(
+    path,
+    *,
+    num_workers: int = 0,
+    pin_memory: bool = True,
+    persistent_workers: bool = False,
+    prefetch_factor: int | None = None,
+    limit_scenes: int | None = None,
+):
+    dataset = TrajectoriesDataset(path, limit_scenes=limit_scenes)
+    kwargs = dict(
+        batch_size=None,
+        shuffle=False,
+        pin_memory=pin_memory,
+        num_workers=max(0, int(num_workers)),
+        persistent_workers=bool(persistent_workers) if num_workers > 0 else False,
     )
+    if prefetch_factor is not None and num_workers > 0:
+        kwargs["prefetch_factor"] = int(prefetch_factor)
+    return torch.utils.data.DataLoader(dataset, **kwargs)

@@ -1,0 +1,53 @@
+mode: train
+data_path: ./datasets/out/
+model_path: ./models/tiny/
+output_path: ./rollouts/tiny/
+output_filename: rollout
+
+# スモーク（数分）
+batch_size: 64
+noise_std: 0.00067
+
+# 速度優先の小型モデル
+nmessage_passing_steps: 1
+latent_dim: 64
+mlp_hidden_dim: 128
+particle_type_embedding_size: 16
+connectivity_radius: 0.03
+
+# データ量を削る
+train_scenes: 64
+valid_scenes: 16
+
+# 学習
+ntraining_steps: 1500
+validation_interval: 100
+nsave_steps: 250
+
+# 評価
+eval_rollout_steps: 0  # one-step のみ
+
+# 学習率
+lr_init: 0.0001
+lr_decay: 0.1
+lr_decay_steps: 10000
+
+# AMP / DataLoader / 乱数
+amp: fp16
+grad_accum: 1
+num_workers: 2
+prefetch_factor: 2
+pin_memory: true
+persistent_workers: false
+seed: 0
+
+# 早期終了（1–2k 内で 30% 改善なければ切る）
+early_stop_check_step: 1200
+early_stop_required_improvement: 0.3
+
+# チェックポイント
+ckpt_keep: 2
+model_file: null
+train_state_file: null
+cuda_device_number: null
+

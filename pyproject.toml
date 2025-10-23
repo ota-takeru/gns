@@ -74,3 +74,22 @@ docstring-code-line-length = "dynamic"
 
 [tool.mypy]
 ignore_missing_imports = true
+
+[tool.uv.scripts]
+# 最短で学習の傾向を確認するための一括コマンド群
+# 事前に `uv sync` と `uv run python datasets/scripts/gen_pymunk.py` でデータ生成をしてください。
+quick-train = "python src/train.py --config config_quick.yaml"
+quick-valid = "python src/train.py --config config_quick_valid.yaml"
+quick-check = "python src/train.py --config config_quick.yaml && python src/train.py --config config_quick_valid.yaml"
+
+# 研究ループ向けプリセット
+tiny-train = "python src/train.py --config config_tiny.yaml"
+tiny-valid = "python src/train.py --config config_tiny_valid.yaml"
+dev-train = "python src/train.py --config config_dev.yaml"
+dev-valid = "python src/train.py --config config_dev_valid.yaml"
+full-train = "python src/train.py --config config_full.yaml"
+full-valid = "python src/train.py --config config_full_valid.yaml"
+
+# シードを3回回してざっくり平均を見る（dev想定）
+dev-3seeds = "python tools/run_seeds.py --config config_dev.yaml"
+tiny-3seeds = "python tools/run_seeds.py --config config_tiny.yaml"

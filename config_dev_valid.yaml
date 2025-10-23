@@ -1,0 +1,22 @@
+mode: valid
+data_path: ./datasets/out/
+model_path: ./models/dev/
+output_path: ./rollouts/dev/
+output_filename: rollout
+
+batch_size: 32
+noise_std: 0.00067
+
+ntraining_steps: 1
+validation_interval: null
+nsave_steps: 1000
+
+lr_init: 0.0001
+lr_decay: 0.1
+lr_decay_steps: 20000
+
+eval_rollout_steps: 20
+
+model_file: latest
+train_state_file: null
+cuda_device_number: null

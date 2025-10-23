@@ -1,0 +1,22 @@
+mode: valid # train / valid / rollout
+data_path: ./datasets/out/
+model_path: ./models/quick/
+output_path: ./rollouts/quick/
+output_filename: rollout
+
+# 学習設定は未使用だが整合のため残す
+batch_size: 2
+noise_std: 0.00067
+ntraining_steps: 200
+validation_interval: null
+nsave_steps: 50
+
+lr_init: 0.0001
+lr_decay: 0.1
+lr_decay_steps: 1000
+
+model_file: latest  # 直近のクイック学習モデルを使用
+train_state_file: null
+
+cuda_device_number: null
+

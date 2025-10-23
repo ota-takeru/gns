@@ -1,0 +1,45 @@
+mode: train
+data_path: ./datasets/out/
+model_path: ./models/full/
+output_path: ./rollouts/full/
+output_filename: rollout
+
+# 本命（長時間）
+batch_size: 16
+noise_std: 0.00067
+
+nmessage_passing_steps: 4
+latent_dim: 256
+mlp_hidden_dim: 512
+particle_type_embedding_size: 16
+connectivity_radius: 0.08
+
+train_scenes: null   # all
+valid_scenes: null   # all
+
+ntraining_steps: 50000
+validation_interval: 1000
+nsave_steps: 1000
+
+eval_rollout_steps: 100
+
+lr_init: 0.0001
+lr_decay: 0.1
+lr_decay_steps: 100000
+
+amp: fp16
+grad_accum: 4
+num_workers: 4
+prefetch_factor: 2
+pin_memory: true
+persistent_workers: true
+seed: 0
+
+early_stop_check_step: 5000
+early_stop_required_improvement: 0.3
+
+ckpt_keep: 3
+model_file: null
+train_state_file: null
+cuda_device_number: null
+

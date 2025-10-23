@@ -51,6 +51,35 @@ class Config:
 
     cuda_device_number: int | None = None  # null で自動選択
 
+    # ---------- 追加: 研究ループ/高速化オプション ----------
+    # モデル構成の上書き（未指定ならデフォルト）
+    nmessage_passing_steps: int | None = None
+    latent_dim: int | None = None
+    mlp_hidden_dim: int | None = None
+    particle_type_embedding_size: int | None = None
+    connectivity_radius: float | None = None
+
+    # DataLoader/I-O
+    num_workers: int = 0
+    persistent_workers: bool = False
+    pin_memory: bool = True
+    prefetch_factor: int | None = None
+    train_scenes: int | None = None  # 例: 64, None で制限なし
+    valid_scenes: int | None = None
+
+    # 学習制御
+    grad_accum: int = 1
+    amp: str | None = None  # "fp16" / "bf16" / None
+    seed: int | None = None
+
+    # 評価と早期終了
+    eval_rollout_steps: int = 0  # 0 で one-step のみ
+    early_stop_check_step: int | None = None
+    early_stop_required_improvement: float = 0.3  # 30% 改善を要求
+
+    # チェックポイント管理
+    ckpt_keep: int | None = None  # None で無制限
+
 
 def load_config(path: str) -> Config:
     with Path(path).open(encoding="utf-8") as f:
@@ -191,19 +220,42 @@ def _get_simulator(
         nnode_in = 37 if metadata["dim"] == 3 else 30
         nedge_in = metadata["dim"] + 1
 
+    # モデル上書きのためにグローバル cfg に触れる（main → train で生成されたもの）
+    global CFG_FOR_BUILD
+    latent_dim = CFG_FOR_BUILD.latent_dim if CFG_FOR_BUILD.latent_dim else 128
+    nmessage = (
+        CFG_FOR_BUILD.nmessage_passing_steps
+        if CFG_FOR_BUILD.nmessage_passing_steps
+        else 10
+    )
+    nmlp_layers = 2
+    mlp_hidden_dim = (
+        CFG_FOR_BUILD.mlp_hidden_dim if CFG_FOR_BUILD.mlp_hidden_dim else 128
+    )
+    particle_type_embedding_size = (
+        CFG_FOR_BUILD.particle_type_embedding_size
+        if CFG_FOR_BUILD.particle_type_embedding_size
+        else 16
+    )
+    connectivity_radius = (
+        CFG_FOR_BUILD.connectivity_radius
+        if CFG_FOR_BUILD.connectivity_radius is not None
+        else metadata["default_connectivity_radius"]
+    )
+
     simulator = learned_simulator.LearnedSimulator(
         particle_dimensions=metadata["dim"],
         nnode_in=nnode_in,
         nedge_in=nedge_in,
-        latent_dim=128,
-        nmessage_passing_steps=10,
-        nmlp_layers=2,
-        mlp_hidden_dim=128,
-        connectivity_radius=metadata["default_connectivity_radius"],
+        latent_dim=latent_dim,
+        nmessage_passing_steps=nmessage,
+        nmlp_layers=nmlp_layers,
+        mlp_hidden_dim=mlp_hidden_dim,
+        connectivity_radius=connectivity_radius,
         # boundaries=np.array(metadata["bounds"]),
         normalization_stats=normalization_stats,
         nparticle_types=NUM_PARTICLE_TYPES,
-        particle_type_embedding_size=16,
+        particle_type_embedding_size=particle_type_embedding_size,
         # boundary_clamp_limit=metadata.get("boundary_augment", 1.0),
         device=device,
     )
@@ -328,7 +380,12 @@ def predict(cfg: Config, device: torch.device):
     split = "test" if (cfg.mode == "rollout" or (not valid_npz.exists())) else "valid"
 
     ds = data_loader.get_data_loader_by_trajectories(
-        path=Path(cfg.data_path) / f"{split}.npz"
+        path=Path(cfg.data_path) / f"{split}.npz",
+        num_workers=cfg.num_workers,
+        pin_memory=cfg.pin_memory,
+        persistent_workers=cfg.persistent_workers,
+        prefetch_factor=cfg.prefetch_factor,
+        limit_scenes=(cfg.valid_scenes if cfg.valid_scenes and cfg.valid_scenes > 0 else None),
     )
 
     # 特徴数(material_property の有無を判定)
@@ -351,6 +408,8 @@ def predict(cfg: Config, device: torch.device):
             else:
                 sequence_length = positions.shape[1]
                 nsteps = int(sequence_length) - INPUT_SEQUENCE_LENGTH
+            if cfg.eval_rollout_steps and cfg.eval_rollout_steps > 0:
+                nsteps = max(0, min(nsteps, int(cfg.eval_rollout_steps)))
 
             particle_type = features[1].to(device)
             if material_property_as_feature:
@@ -429,6 +488,17 @@ def train(cfg: Config, device: torch.device):
     simulator.to(device)
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
 
+    # AMP 設定
+    amp_dtype: torch.dtype | None
+    if cfg.amp == "fp16" and device.type == "cuda":
+        amp_dtype = torch.float16
+    elif cfg.amp == "bf16" and torch.cuda.is_available():
+        # bf16 は GPU に依存。利用可能な場合にのみ使用。
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = None
+    scaler = torch.cuda.amp.GradScaler(enabled=(amp_dtype == torch.float16))
+
     log_interval = max(1, int(cfg.log_interval))
 
     # 進捗状態
@@ -488,6 +558,12 @@ def train(cfg: Config, device: torch.device):
         path=Path(cfg.data_path) / "train.npz",
         input_length_sequence=INPUT_SEQUENCE_LENGTH,
         batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=cfg.pin_memory,
+        persistent_workers=cfg.persistent_workers,
+        prefetch_factor=cfg.prefetch_factor,
+        limit_scenes=(cfg.train_scenes if cfg.train_scenes and cfg.train_scenes > 0 else None),
     )
     n_features = len(dl.dataset[0])
 
@@ -503,10 +579,40 @@ def train(cfg: Config, device: torch.device):
             path=Path(cfg.data_path) / "valid.npz",
             input_length_sequence=INPUT_SEQUENCE_LENGTH,
             batch_size=cfg.batch_size,
+            shuffle=False,
+            num_workers=cfg.num_workers,
+            pin_memory=cfg.pin_memory,
+            persistent_workers=cfg.persistent_workers,
+            prefetch_factor=cfg.prefetch_factor,
+            limit_scenes=(
+                cfg.valid_scenes if cfg.valid_scenes and cfg.valid_scenes > 0 else None
+            ),
         )
         if len(dl_valid.dataset[0]) != n_features:
             msg = "`valid.npz` と `train.npz` の特徴数が一致していません。"
             raise ValueError(msg)
+
+    # 早期終了の参考用
+    baseline_valid: float | None = None
+    best_valid: float | None = None
+    passed: bool | None = None
+
+    def _maybe_prune_checkpoints():
+        if cfg.ckpt_keep is None or cfg.ckpt_keep <= 0:
+            return
+        files = sorted(
+            Path(cfg.model_path).glob("model-*.pt"),
+            key=lambda p: int(re.findall(r"model-(\d+)\.pt", p.name)[0]) if re.findall(r"model-(\d+)\.pt", p.name) else -1,
+        )
+        if len(files) > cfg.ckpt_keep:
+            for f in files[: len(files) - cfg.ckpt_keep]:
+                try:
+                    f.unlink()
+                    tsf = f.with_name(f"train_state-{re.findall(r'model-(\d+)\\.pt', f.name)[0]}.pt")
+                    if tsf.exists():
+                        tsf.unlink()
+                except Exception:
+                    pass
 
     try:
         while step < cfg.ntraining_steps:
@@ -534,14 +640,15 @@ def train(cfg: Config, device: torch.device):
                 sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
                 # 予測 & 教師(加速度)
-                pred_acc, target_acc = simulator.predict_accelerations(
-                    next_positions=labels,
-                    position_sequence_noise=sampled_noise,
-                    position_sequence=position,
-                    nparticles_per_example=n_particles_per_example,
-                    particle_types=particle_type,
-                    material_property=material_property,
-                )
+                with torch.cuda.amp.autocast(enabled=(amp_dtype is not None), dtype=amp_dtype):
+                    pred_acc, target_acc = simulator.predict_accelerations(
+                        next_positions=labels,
+                        position_sequence_noise=sampled_noise,
+                        position_sequence=position,
+                        nparticles_per_example=n_particles_per_example,
+                        particle_types=particle_type,
+                        material_property=material_property,
+                    )
 
                 # (オプション)軽量バリデーション
                 if (
@@ -561,9 +668,30 @@ def train(cfg: Config, device: torch.device):
                 train_loss = float(loss.item())
                 epoch_train_loss += train_loss
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                # 勾配蓄積
+                accumulate = max(1, int(cfg.grad_accum))
+                loss_to_backprop = loss / accumulate
+                optimizer.zero_grad(set_to_none=True) if (step % accumulate == 0) else None
+                if scaler.is_enabled():
+                    scaler.scale(loss_to_backprop).backward()
+                else:
+                    loss_to_backprop.backward()
+
+                # 勾配ノルム監視（簡易）
+                grad_norm = None
+                total_norm = 0.0
+                for p in simulator.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2).item()
+                        total_norm += param_norm * param_norm
+                grad_norm = (total_norm ** 0.5) if total_norm > 0 else 0.0
+
+                if (step + 1) % accumulate == 0:
+                    if scaler.is_enabled():
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
 
                 # 学習率を指数減衰で更新
                 lr_new = cfg.lr_init * (cfg.lr_decay ** (step / cfg.lr_decay_steps))
@@ -588,8 +716,9 @@ def train(cfg: Config, device: torch.device):
                         avg = elapsed / max(1, steps_counted_for_eta)
                         eta_sec = remaining_steps * avg
                     eta_str = _format_eta(eta_sec)
+                    sps = (1.0 / ema_step_time) if (ema_step_time and ema_step_time > 0) else 0.0
                     print(
-                        f"epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e} eta={eta_str}"
+                        f"epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e} grad_norm={grad_norm:.2f} it/s={sps:.2f} eta={eta_str}"
                     )
 
                 # 保存
@@ -605,6 +734,38 @@ def train(cfg: Config, device: torch.device):
                         train_loss_hist,
                         valid_loss_hist,
                     )
+                    _maybe_prune_checkpoints()
+
+                # 早期停止の簡易ロジック（one-step valid ベース）
+                if (
+                    dl_valid is not None
+                    and validation_interval is not None
+                    and step > 0
+                    and step % validation_interval == 0
+                ):
+                    sampled_valid_example = next(iter(dl_valid))
+                    cur_valid = validation(
+                        simulator, sampled_valid_example, n_features, cfg, device
+                    )
+                    v = float(cur_valid.item())
+                    if baseline_valid is None:
+                        baseline_valid = v
+                        best_valid = v
+                    else:
+                        best_valid = min(best_valid, v) if best_valid is not None else v
+                    # 指定ステップ到達かつ改善不足なら停止
+                    if (
+                        cfg.early_stop_check_step is not None
+                        and step >= int(cfg.early_stop_check_step)
+                        and baseline_valid is not None
+                    ):
+                        required = baseline_valid * (1.0 - float(cfg.early_stop_required_improvement))
+                        if (best_valid is None) or (best_valid > required):
+                            print(
+                                f"[early-stop] best_valid={best_valid:.6f} baseline={baseline_valid:.6f} required<={required:.6f}. Stop."
+                            )
+                            passed = False
+                            raise KeyboardInterrupt
 
                 step += 1
                 if step >= cfg.ntraining_steps:
@@ -652,6 +813,12 @@ def train(cfg: Config, device: torch.device):
         valid_loss_hist,
     )
 
+    # 実験ログを CSV へ
+    try:
+        _append_exp_log(cfg, step, train_loss_hist, valid_loss_hist, passed)
+    except Exception:
+        pass
+
 
 # -----------------------
 # エントリーポイント
@@ -661,9 +828,26 @@ def main():
 
     p = argparse.ArgumentParser(description="GNS Runner (no DDP)")
     p.add_argument("--config", "-c", default="config.yaml", help="Path to YAML config")
+    p.add_argument("--mode", choices=["train", "valid", "rollout"], help="Override run mode", nargs="?")
+    p.add_argument("--seed", type=int, help="Override RNG seed", nargs="?")
     args = p.parse_args()
 
     cfg = load_config(args.config)
+    if args.mode is not None:
+        cfg.mode = args.mode
+    if args.seed is not None:
+        cfg.seed = int(args.seed)
+
+    # 乱数シード
+    if cfg.seed is not None:
+        try:
+            import random, numpy as np
+
+            random.seed(cfg.seed)
+            np.random.seed(cfg.seed)
+        except Exception:
+            pass
+        torch.manual_seed(cfg.seed)
 
     # デバイス選択
     if torch.cuda.is_available() and cfg.cuda_device_number is not None:
@@ -680,6 +864,10 @@ def main():
     ) as f:
         json.dump(_asjsonable_cfg(cfg), f, ensure_ascii=False, indent=2)
 
+    # ビルド用 cfg（モデル上書きに使用）
+    global CFG_FOR_BUILD
+    CFG_FOR_BUILD = cfg
+
     if cfg.mode == "train":
         train(cfg, device)
     elif cfg.mode in ("valid", "rollout"):
@@ -691,3 +879,64 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# -----------------------
+# 付帯ユーティリティ
+# -----------------------
+def _append_exp_log(
+    cfg: Config,
+    step: int,
+    train_hist: list[tuple[int, float]],
+    valid_hist: list[tuple[int, float]],
+    passed: bool | None,
+):
+    import csv
+    import subprocess
+    from datetime import datetime
+
+    commit = "unknown"
+    try:
+        commit = (
+            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True)
+            .strip()
+        )
+    except Exception:
+        pass
+
+    exp_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    it_s = None
+    # 最終 10 エポックの平均を簡易 it/s として保存（近似）
+    # 計算済みの値がないので NA にしておく
+
+    # 代表値抽出
+    def _pick(hist: list[tuple[int, float]], epoch: int | None = None):
+        if not hist:
+            return None
+        return float(hist[-1][1])
+
+    train_at_end = _pick(train_hist)
+    valid_at_end = _pick(valid_hist)
+
+    # rollout20 は predict 時に評価する前提なのでここでは NA
+    row = dict(
+        exp_id=exp_id,
+        git_commit=commit,
+        cfg=str(cfg.__dict__),
+        seed=cfg.seed,
+        time_min=None,
+        it_s=it_s,
+        step=step,
+        train_loss=train_at_end,
+        valid_one_step=valid_at_end,
+        rollout20_mse=None,
+        passed=passed,
+    )
+
+    Path(cfg.model_path).mkdir(parents=True, exist_ok=True)
+    fpath = Path(cfg.model_path) / "exp_log.csv"
+    write_header = not fpath.exists()
+    with fpath.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
