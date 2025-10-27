@@ -11,6 +11,7 @@ dependencies = [
     "pymunk>=7.1.0",
     "pyyaml>=6.0.2",
     "ruff>=0.14.1",
+    "tensorboard>=2.20.0",
     "torch-geometric>=2.7.0",
     "torch>=2.7.0",
     "torchvision>=0.22.0",

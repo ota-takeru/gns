@@ -1,15 +1,17 @@
 import glob
 import json
+import math
 import pickle
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-import time
 
 import torch
-import yaml
 from tqdm import tqdm
+import yaml
+from torch.utils.tensorboard import SummaryWriter
 
 import data_loader
 
@@ -17,6 +19,11 @@ import data_loader
 import learned_simulator
 import noise_utils
 import reading_utils
+
+try:
+    from tensorboard import program as tensorboard_program
+except ImportError:  # pragma: no cover - optional dependency
+    tensorboard_program = None
 
 # -----------------------
 # 設定
@@ -36,11 +43,19 @@ class Config:
 
     batch_size: int = 2
     noise_std: float = 6.7e-4
-    log_interval: int = 1000
+    log_interval: int = 10
 
     ntraining_steps: int = int(2e7)
     validation_interval: int | None = None
     nsave_steps: int = 5000
+    rollout_interval: int | None = None
+    rollout_max_examples: int = 1
+    rollout_dataset: str | None = None
+    train_dataset_fraction: float | None = None
+    valid_dataset_fraction: float | None = None
+    train_dataset_count: int | None = None
+    valid_dataset_count: int | None = None
+    tensorboard_interval: int | None = None
 
     lr_init: float = 1e-4
     lr_decay: float = 0.1
@@ -50,6 +65,9 @@ class Config:
     train_state_file: str | None = "train_state.pt"  # "latest" or ファイル名 or null
 
     cuda_device_number: int | None = None  # null で自動選択
+    tensorboard_log_dir: str | None = None
+    tensorboard_port: int | None = None
+    tensorboard_host: str | None = None
 
 
 def load_config(path: str) -> Config:
@@ -138,12 +156,23 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "ntraining_steps": cfg.ntraining_steps,
         "validation_interval": cfg.validation_interval,
         "nsave_steps": cfg.nsave_steps,
+        "rollout_interval": cfg.rollout_interval,
+        "rollout_max_examples": cfg.rollout_max_examples,
+        "rollout_dataset": cfg.rollout_dataset,
+        "train_dataset_fraction": cfg.train_dataset_fraction,
+        "valid_dataset_fraction": cfg.valid_dataset_fraction,
+        "train_dataset_count": cfg.train_dataset_count,
+        "valid_dataset_count": cfg.valid_dataset_count,
+        "tensorboard_interval": cfg.tensorboard_interval,
         "lr_init": cfg.lr_init,
         "lr_decay": cfg.lr_decay,
         "lr_decay_steps": cfg.lr_decay_steps,
         "model_file": cfg.model_file,
         "train_state_file": cfg.train_state_file,
         "cuda_device_number": cfg.cuda_device_number,
+        "tensorboard_log_dir": cfg.tensorboard_log_dir,
+        "tensorboard_port": cfg.tensorboard_port,
+        "tensorboard_host": cfg.tensorboard_host,
     }
 
 
@@ -156,6 +185,155 @@ def _format_eta(seconds: float) -> str:
     if h > 0:
         return f"{h:d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+
+def _launch_tensorboard(
+    log_dir: Path, host: str | None, port: int | None
+) -> tuple[Any | None, str | None]:
+    if tensorboard_program is None:
+        return None, None
+    tb = tensorboard_program.TensorBoard()
+    argv = [None, "--logdir", str(log_dir)]
+    if host:
+        argv += ["--host", host]
+    if port:
+        argv += ["--port", str(port)]
+    try:
+        tb.configure(argv=argv)
+        url = tb.launch()
+    except Exception:  # pragma: no cover - runtime environment dependent
+        return None, None
+    return tb, url
+
+
+class RolloutEvaluator:
+    """Utility to compute rollout stability metrics on demand."""
+
+    def __init__(
+        self,
+        loader: torch.utils.data.DataLoader,
+        device: torch.device,
+        max_examples: int = 1,
+    ):
+        self._loader = loader
+        self._device = device
+        self._max_examples = max(1, int(max_examples))
+        self._iterator: Any | None = None
+
+    def evaluate(
+        self, simulator: learned_simulator.LearnedSimulator
+    ) -> dict[str, float | None]:
+        metrics_list: list[dict[str, float]] = []
+        for _ in range(self._max_examples):
+            example = self._next_example()
+            if example is None:
+                break
+            metrics = self._evaluate_example(simulator, example)
+            if metrics is not None:
+                metrics_list.append(metrics)
+
+        if not metrics_list:
+            return {
+                "rollout_rmse_mean": None,
+                "rollout_rmse_last": None,
+                "rollout_instability": None,
+            }
+
+        aggregated: dict[str, float] = {}
+        for key in metrics_list[0]:
+            aggregated[key] = sum(m[key] for m in metrics_list) / len(metrics_list)
+        return aggregated
+
+    def _next_example(self):
+        if self._iterator is None:
+            self._iterator = iter(self._loader)
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            self._iterator = iter(self._loader)
+            try:
+                return next(self._iterator)
+            except StopIteration:
+                return None
+
+    def _evaluate_example(
+        self, simulator: learned_simulator.LearnedSimulator, example: tuple
+    ) -> dict[str, float] | None:
+        if len(example) == 4:
+            positions, particle_type, material_property, n_particles = example
+            material_property_tensor = material_property.to(self._device)
+            n_particles_tensor = torch.tensor(
+                [int(n_particles)], dtype=torch.int32, device=self._device
+            )
+        elif len(example) == 3:
+            positions, particle_type, n_particles = example
+            material_property_tensor = None
+            n_particles_tensor = torch.tensor(
+                [int(n_particles)], dtype=torch.int32, device=self._device
+            )
+        else:
+            return None
+
+        positions = positions.to(self._device)
+        particle_type = particle_type.to(self._device)
+
+        nsteps = positions.shape[1] - INPUT_SEQUENCE_LENGTH
+        if nsteps <= 0:
+            return None
+
+        _, loss = rollout(
+            simulator,
+            positions,
+            particle_type,
+            material_property_tensor,
+            n_particles_tensor,
+            nsteps,
+            self._device,
+            show_progress=False,
+        )
+
+        if loss.numel() == 0:
+            return None
+
+        rmse_per_step = torch.sqrt(loss.mean(dim=(1, 2)))
+        rmse_mean = float(rmse_per_step.mean().item())
+        rmse_last = float(rmse_per_step[-1].item())
+        if rmse_mean > 0.0:
+            instability = float(rmse_last / rmse_mean)
+        else:
+            instability = 0.0
+
+        return {
+            "rollout_rmse_mean": rmse_mean,
+            "rollout_rmse_last": rmse_last,
+            "rollout_instability": instability,
+        }
+
+
+def _compute_grad_norm(parameters) -> float | None:
+    total = 0.0
+    has_grad = False
+    for param in parameters:
+        if param.grad is None:
+            continue
+        total += float(param.grad.detach().pow(2).sum().item())
+        has_grad = True
+    if not has_grad:
+        return None
+    return math.sqrt(total)
+
+
+def _resolve_rollout_dataset_path(cfg: Config) -> Path | None:
+    base = Path(cfg.data_path)
+    if cfg.rollout_dataset:
+        candidate = base / f"{cfg.rollout_dataset}.npz"
+        if candidate.exists():
+            return candidate
+    for split_name in ("valid", "test", "train"):
+        candidate = base / f"{split_name}.npz"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 # -----------------------
@@ -221,6 +399,8 @@ def rollout(
     n_particles_per_example: torch.Tensor,
     nsteps: int,
     device: torch.device,
+    *,
+    show_progress: bool = True,
 ) -> tuple[dict[str, Any], torch.Tensor]:
     """逐次1ステップ予測をシフト窓で積み上げるロールアウト
     position: (B, T, N, D) を想定。ここでは B=1 を前提に扱っている実装。
@@ -232,7 +412,11 @@ def rollout(
     current_positions = initial_positions
     predictions_list = []
 
-    for _ in tqdm(range(nsteps), total=nsteps):
+    step_iterator = range(nsteps)
+    if show_progress:
+        step_iterator = tqdm(step_iterator, total=nsteps)
+
+    for step_idx in step_iterator:
         next_position = simulator.predict_positions(
             current_positions,
             nparticles_per_example=n_particles_per_example,
@@ -241,7 +425,7 @@ def rollout(
         )
         # 運動学粒子は教師で上書き
         kinematic_mask = (particle_types == KINEMATIC_PARTICLE_ID).to(device)
-        next_position_gt = ground_truth_positions[:, _]  # (B=1, N, D)
+        next_position_gt = ground_truth_positions[:, step_idx]  # (B=1, N, D)
         kinematic_mask = kinematic_mask.bool()[:, None].expand(
             -1, current_positions.shape[-1]
         )
@@ -428,8 +612,38 @@ def train(cfg: Config, device: torch.device):
     simulator = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
     simulator.to(device)
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
+    current_lr = cfg.lr_init
 
     log_interval = max(1, int(cfg.log_interval))
+    if cfg.tensorboard_interval is not None:
+        tensorboard_interval = max(1, int(cfg.tensorboard_interval))
+    else:
+        tensorboard_interval = log_interval
+
+    tb_writer: SummaryWriter | None = None
+    tb_server: Any | None = None
+    tb_url: str | None = None
+    tb_log_base = (
+        Path(cfg.tensorboard_log_dir)
+        if cfg.tensorboard_log_dir is not None
+        else Path(cfg.model_path) / "tb"
+    )
+    try:
+        tb_writer = SummaryWriter(log_dir=str(tb_log_base))
+        tb_log_path = Path(tb_writer.log_dir).resolve()
+        print(f"TensorBoard logging to {tb_log_path}")
+        tb_server, tb_url = _launch_tensorboard(
+            tb_log_path, cfg.tensorboard_host, cfg.tensorboard_port
+        )
+        if tb_url:
+            print(f"TensorBoard available at {tb_url}")
+        else:
+            cmd_hint = f"tensorboard --logdir {tb_log_path}"
+            print(f"Launch TensorBoard manually if needed:\n  {cmd_hint}")
+    except Exception as exc:  # pragma: no cover - optional dependency/path issues
+        print(f"Warning: could not initialize TensorBoard writer: {exc}")
+        tb_writer = None
+        tb_server = None
 
     # 進捗状態
     step = 0
@@ -439,6 +653,10 @@ def train(cfg: Config, device: torch.device):
     valid_loss = None
     epoch_train_loss = 0.0
     epoch_valid_loss = None
+    latest_valid_loss_value: float | None = None
+    latest_rollout_metrics: dict[str, float | None] | None = None
+    last_grad_norm: float | None = None
+    last_logged_step = -1
 
     train_loss_hist = []
     valid_loss_hist = []
@@ -488,6 +706,8 @@ def train(cfg: Config, device: torch.device):
         path=Path(cfg.data_path) / "train.npz",
         input_length_sequence=INPUT_SEQUENCE_LENGTH,
         batch_size=cfg.batch_size,
+        fraction=cfg.train_dataset_fraction,
+        max_trajectories=cfg.train_dataset_count,
     )
     n_features = len(dl.dataset[0])
 
@@ -503,10 +723,36 @@ def train(cfg: Config, device: torch.device):
             path=Path(cfg.data_path) / "valid.npz",
             input_length_sequence=INPUT_SEQUENCE_LENGTH,
             batch_size=cfg.batch_size,
+            fraction=cfg.valid_dataset_fraction,
+            max_trajectories=cfg.valid_dataset_count,
+            shuffle=False,
         )
         if len(dl_valid.dataset[0]) != n_features:
             msg = "`valid.npz` と `train.npz` の特徴数が一致していません。"
             raise ValueError(msg)
+
+    rollout_evaluator: RolloutEvaluator | None = None
+    rollout_interval = (
+        int(cfg.rollout_interval) if cfg.rollout_interval and cfg.rollout_interval > 0 else None
+    )
+    if rollout_interval is not None:
+        rollout_dataset_path = _resolve_rollout_dataset_path(cfg)
+        if rollout_dataset_path is None:
+            print(
+                "Warning: rollout metrics enabled but no suitable dataset was found; "
+                "disabling rollout evaluation."
+            )
+            rollout_interval = None
+        else:
+            rollout_loader = data_loader.get_data_loader_by_trajectories(
+                rollout_dataset_path
+            )
+            rollout_evaluator = RolloutEvaluator(
+                rollout_loader, device, cfg.rollout_max_examples
+            )
+            print(
+                f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}"
+            )
 
     try:
         while step < cfg.ntraining_steps:
@@ -554,7 +800,48 @@ def train(cfg: Config, device: torch.device):
                     valid_loss = validation(
                         simulator, sampled_valid_example, n_features, cfg, device
                     )
-                    print(f"[valid @ step {step}] {valid_loss.item():.6f}")
+                    latest_valid_loss_value = float(valid_loss.item())
+                    print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
+                    if tb_writer is not None:
+                        tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+
+                if (
+                    rollout_evaluator is not None
+                    and rollout_interval is not None
+                    and step > 0
+                    and step % rollout_interval == 0
+                ):
+                    simulator.eval()
+                    with torch.no_grad():
+                        rollout_metrics = rollout_evaluator.evaluate(simulator)
+                    simulator.train()
+                    latest_rollout_metrics = rollout_metrics
+                    if (
+                        rollout_metrics["rollout_rmse_mean"] is not None
+                        and rollout_metrics["rollout_rmse_last"] is not None
+                    ):
+                        print(
+                            "[rollout @ step "
+                            f"{step}] mean={rollout_metrics['rollout_rmse_mean']:.6f} "
+                            f"last={rollout_metrics['rollout_rmse_last']:.6f} "
+                            f"instability={rollout_metrics['rollout_instability']:.3f}"
+                        )
+                        if tb_writer is not None:
+                            tb_writer.add_scalar(
+                                "rollout/rmse_mean",
+                                float(rollout_metrics["rollout_rmse_mean"]),
+                                step,
+                            )
+                            tb_writer.add_scalar(
+                                "rollout/rmse_last",
+                                float(rollout_metrics["rollout_rmse_last"]),
+                                step,
+                            )
+                            tb_writer.add_scalar(
+                                "rollout/instability",
+                                float(rollout_metrics["rollout_instability"]),
+                                step,
+                            )
 
                 # ロス → 逆伝播 → 更新
                 loss = acceleration_loss(pred_acc, target_acc, non_kinematic_mask)
@@ -563,12 +850,15 @@ def train(cfg: Config, device: torch.device):
 
                 optimizer.zero_grad()
                 loss.backward()
+                grad_norm = _compute_grad_norm(simulator.parameters())
+                last_grad_norm = grad_norm
                 optimizer.step()
 
                 # 学習率を指数減衰で更新
                 lr_new = cfg.lr_init * (cfg.lr_decay ** (step / cfg.lr_decay_steps))
                 for g in optimizer.param_groups:
                     g["lr"] = lr_new
+                current_lr = lr_new
 
                 # 1 ステップ時間を EMA で更新（軽量）
                 step_duration = time.perf_counter() - step_tic
@@ -588,9 +878,55 @@ def train(cfg: Config, device: torch.device):
                         avg = elapsed / max(1, steps_counted_for_eta)
                         eta_sec = remaining_steps * avg
                     eta_str = _format_eta(eta_sec)
-                    print(
-                        f"epoch={epoch} step={step}/{cfg.ntraining_steps} loss={train_loss:.6f} lr={lr_new:.6e} eta={eta_str}"
-                    )
+                    log_parts = [
+                        f"epoch={epoch}",
+                        f"step={step}/{cfg.ntraining_steps}",
+                        f"loss={train_loss:.6f}",
+                        f"lr={lr_new:.6e}",
+                    ]
+                    if last_grad_norm is not None:
+                        log_parts.append(f"grad_norm={last_grad_norm:.4f}")
+                    if latest_valid_loss_value is not None:
+                        log_parts.append(f"valid={latest_valid_loss_value:.6f}")
+                    if latest_rollout_metrics is not None:
+                        rmse_mean = latest_rollout_metrics.get("rollout_rmse_mean")
+                        rmse_last = latest_rollout_metrics.get("rollout_rmse_last")
+                        instability = latest_rollout_metrics.get("rollout_instability")
+                        if rmse_mean is not None and rmse_last is not None:
+                            log_parts.append(f"rollout_mean={rmse_mean:.6f}")
+                            log_parts.append(f"rollout_last={rmse_last:.6f}")
+                            log_parts.append(f"rollout_instab={instability:.3f}")
+                    log_parts.append(f"eta={eta_str}")
+                    print(" ".join(log_parts))
+
+                if tb_writer is not None and step % tensorboard_interval == 0:
+                    tb_writer.add_scalar("train/loss", train_loss, step)
+                    tb_writer.add_scalar("train/lr", lr_new, step)
+                    if last_grad_norm is not None:
+                        tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
+                    if latest_valid_loss_value is not None:
+                        tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+                    if (
+                        latest_rollout_metrics is not None
+                        and latest_rollout_metrics.get("rollout_rmse_mean") is not None
+                    ):
+                        tb_writer.add_scalar(
+                            "rollout/rmse_mean",
+                            float(latest_rollout_metrics["rollout_rmse_mean"]),
+                            step,
+                        )
+                        tb_writer.add_scalar(
+                            "rollout/rmse_last",
+                            float(latest_rollout_metrics["rollout_rmse_last"]),
+                            step,
+                        )
+                        tb_writer.add_scalar(
+                            "rollout/instability",
+                            float(latest_rollout_metrics["rollout_instability"]),
+                            step,
+                        )
+                    tb_writer.flush()
+                    last_logged_step = step
 
                 # 保存
                 if cfg.nsave_steps and step % cfg.nsave_steps == 0:
@@ -621,12 +957,19 @@ def train(cfg: Config, device: torch.device):
                 epoch_valid_loss = validation(
                     simulator, sampled_valid_example, n_features, cfg, device
                 )
-                valid_loss_hist.append((epoch, float(epoch_valid_loss.item())))
+                epoch_valid_loss_float = float(epoch_valid_loss.item())
+                valid_loss_hist.append((epoch, epoch_valid_loss_float))
+                latest_valid_loss_value = epoch_valid_loss_float
                 print(
-                    f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss.item():.6f}"
+                    f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
                 )
+                if tb_writer is not None:
+                    tb_writer.add_scalar("epoch/valid_loss", epoch_valid_loss_float, epoch)
             else:
                 print(f"[epoch {epoch}] train={epoch_avg:.6f}")
+            if tb_writer is not None:
+                tb_writer.add_scalar("epoch/train_loss", epoch_avg, epoch)
+                tb_writer.flush()
 
             # リセット
             epoch_train_loss = 0.0
@@ -638,19 +981,56 @@ def train(cfg: Config, device: torch.device):
 
     except KeyboardInterrupt:
         print("Interrupted. Saving last state...")
-
-    # 終了時に最終保存
-    save_model_and_train_state(
-        simulator,
-        cfg,
-        step,
-        epoch,
-        optimizer,
-        train_loss,
-        float(valid_loss.item()) if valid_loss is not None else None,
-        train_loss_hist,
-        valid_loss_hist,
-    )
+    finally:
+        save_model_and_train_state(
+            simulator,
+            cfg,
+            step,
+            epoch,
+            optimizer,
+            train_loss,
+            float(valid_loss.item()) if valid_loss is not None else None,
+            train_loss_hist,
+            valid_loss_hist,
+        )
+        if tb_writer is not None:
+            if last_logged_step != step:
+                tb_writer.add_scalar("train/loss", train_loss, step)
+                tb_writer.add_scalar("train/lr", current_lr, step)
+                if last_grad_norm is not None:
+                    tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
+                if latest_valid_loss_value is not None:
+                    tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+                if (
+                    latest_rollout_metrics is not None
+                    and latest_rollout_metrics.get("rollout_rmse_mean") is not None
+                ):
+                    tb_writer.add_scalar(
+                        "rollout/rmse_mean",
+                        float(latest_rollout_metrics["rollout_rmse_mean"]),
+                        step,
+                    )
+                    tb_writer.add_scalar(
+                        "rollout/rmse_last",
+                        float(latest_rollout_metrics["rollout_rmse_last"]),
+                        step,
+                    )
+                    tb_writer.add_scalar(
+                        "rollout/instability",
+                        float(latest_rollout_metrics["rollout_instability"]),
+                        step,
+                    )
+                tb_writer.flush()
+            tb_writer.close()
+        if (
+            tb_server is not None
+            and hasattr(tb_server, "_server")
+            and tb_server._server is not None
+        ):
+            try:  # pragma: no cover - server cleanup
+                tb_server._server.stop()
+            except Exception:
+                pass
 
 
 # -----------------------
