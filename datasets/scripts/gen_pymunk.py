@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import random
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -533,6 +534,13 @@ def main(
     _generate_split(
         "valid", cfg.num_valid_scenes, seed_offset=cfg.num_train_scenes
     )
+
+    # Rollout 用に valid の複製を test.npz として用意
+    valid_npz = out_dir / "valid.npz"
+    test_npz = out_dir / "test.npz"
+    if valid_npz.exists():
+        shutil.copy2(valid_npz, test_npz)
+        print(f"Duplicated {valid_npz} -> {test_npz}")
 
 
 if __name__ == "__main__":
