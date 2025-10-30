@@ -36,12 +36,13 @@ backend = matplotlib.get_backend().lower()
 
 if "agg" in backend:
     # 非対話バックエンドではHTMLを保存して確認できるようにする
-    from matplotlib.animation import HTMLWriter
-
     html_dir = DATASET_DIR / "animations"
     html_dir.mkdir(parents=True, exist_ok=True)
     html_path = html_dir / f"{DATASET_PATH.stem}.html"
-    ani.save(html_path, writer=HTMLWriter(fps=100))
+    # 単一HTMLにフレームを直接埋め込む
+    html = ani.to_jshtml(fps=100)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
     print(f"Saved animation to {html_path}")
     plt.close(fig)
 else:

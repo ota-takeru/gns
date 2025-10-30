@@ -191,9 +191,10 @@ def visualize_2d(
     if save_as_html or "agg" in backend:
         if output_path is None:
             output_path = Path("rollout_visualization.html")
-        from matplotlib.animation import HTMLWriter
-
-        ani.save(output_path, writer=HTMLWriter(fps=20))
+        # Embed frames directly into a single self-contained HTML
+        html = ani.to_jshtml(fps=20)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html)
         print(f"Saved animation to {output_path}")
         plt.close(fig)
     elif output_path is not None:
@@ -316,9 +317,10 @@ def visualize_3d(
     if save_as_html or "agg" in backend:
         if output_path is None:
             output_path = Path("rollout_visualization_3d.html")
-        from matplotlib.animation import HTMLWriter
-
-        ani.save(output_path, writer=HTMLWriter(fps=20))
+        # Embed frames directly into a single self-contained HTML
+        html = ani.to_jshtml(fps=20)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html)
         print(f"Saved animation to {output_path}")
         plt.close(fig)
     elif output_path is not None:
