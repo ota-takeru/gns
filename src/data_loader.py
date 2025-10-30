@@ -12,7 +12,14 @@ def load_npz_data(path):
 
 
 class SamplesDataset(torch.utils.data.Dataset):
-    def __init__(self, path, input_length_sequence):
+    def __init__(
+        self,
+        path,
+        input_length_sequence,
+        *,
+        fraction: float | None = None,
+        max_trajectories: int | None = None,
+    ):
         super().__init__()
         # load dataset stored in npz format
         # data is loaded as dict of tuples
@@ -20,6 +27,16 @@ class SamplesDataset(torch.utils.data.Dataset):
         # convert to list of tuples
         # TODO: allow_pickle=True is potential security risk. See docs.
         self._data = load_npz_data(path)
+        total_trajectories = len(self._data)
+        if max_trajectories is not None:
+            max_trajectories = max(1, int(max_trajectories))
+            self._data = self._data[:max_trajectories]
+        elif fraction is not None:
+            if not (0 < fraction <= 1.0):
+                msg = "`fraction` must be in the range (0, 1]."
+                raise ValueError(msg)
+            keep = max(1, int(total_trajectories * fraction))
+            self._data = self._data[:keep]
 
         # length of each trajectory in the dataset
         # excluding the input_length_sequence
@@ -215,8 +232,21 @@ class TrajectoriesDataset(torch.utils.data.Dataset):
         return trajectory
 
 
-def get_data_loader_by_samples(path, input_length_sequence, batch_size, shuffle=True):
-    dataset = SamplesDataset(path, input_length_sequence)
+def get_data_loader_by_samples(
+    path,
+    input_length_sequence,
+    batch_size,
+    shuffle=True,
+    *,
+    fraction: float | None = None,
+    max_trajectories: int | None = None,
+):
+    dataset = SamplesDataset(
+        path,
+        input_length_sequence,
+        fraction=fraction,
+        max_trajectories=max_trajectories,
+    )
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,

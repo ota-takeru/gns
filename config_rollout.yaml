@@ -5,7 +5,7 @@ output_path: ./rollouts/
 output_filename: rollout
 
 batch_size: 4
-noise_std: 0.0003.........
+noise_std: 0.0003
 
 # トレーニング
 ntraining_steps: 20000000

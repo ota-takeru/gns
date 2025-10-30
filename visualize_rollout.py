@@ -7,6 +7,7 @@ rollouts/フォルダ内のpklファイルを読み込み、
 """
 
 import argparse
+import math
 import pickle
 from pathlib import Path
 
@@ -14,6 +15,59 @@ import matplotlib
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
+
+
+def _compute_marker_size(spacing: float | None, scale: float = 1.0) -> float:
+    scale = max(0.1, float(scale))
+    if spacing is None or spacing <= 0:
+        return 16.0 * scale**2
+    radius = max(1.5, spacing * 45.0)
+    radius *= scale
+    return min(72.0, radius**2)
+
+
+def _load_viz_params_from_config() -> tuple[float | None, float | None]:
+    config_path = Path("datasets/config.yaml")
+    if not config_path.exists():
+        return None, None
+    with config_path.open("r", encoding="utf-8") as fp:
+        data = yaml.safe_load(fp) or {}
+    density = data.get("particle_density")
+    spacing = (
+        1.0 / math.sqrt(float(density))
+        if isinstance(density, (int, float)) and density > 0
+        else None
+    )
+    scale = data.get("visualization_marker_scale")
+    if isinstance(scale, (int, float)) and scale > 0:
+        scale = float(scale)
+    else:
+        scale = None
+    return spacing, scale
+
+
+def _resolve_particle_spacing(metadata: dict | None) -> float | None:
+    if isinstance(metadata, dict):
+        spacing = metadata.get("particle_spacing")
+        if isinstance(spacing, (int, float)) and spacing > 0:
+            return float(spacing)
+        density = metadata.get("particle_density")
+        if isinstance(density, (int, float)) and density > 0:
+            return 1.0 / math.sqrt(float(density))
+    spacing, _ = _load_viz_params_from_config()
+    return spacing
+
+
+def _resolve_marker_scale(metadata: dict | None) -> float:
+    if isinstance(metadata, dict):
+        scale = metadata.get("visualization_marker_scale")
+        if isinstance(scale, (int, float)) and scale > 0:
+            return float(scale)
+    _, scale = _load_viz_params_from_config()
+    if isinstance(scale, float) and scale > 0:
+        return scale
+    return 1.0
 
 
 def load_rollout(pkl_path: Path) -> dict:
@@ -65,6 +119,9 @@ def visualize_rollout(
 
     n_frames = len(all_positions_pred)
     dim = all_positions_pred.shape[-1]
+    metadata = data.get("metadata")
+    particle_spacing = _resolve_particle_spacing(metadata)
+    marker_scale = _resolve_marker_scale(metadata)
 
     # 2D or 3D
     if dim == 2:
@@ -73,6 +130,8 @@ def visualize_rollout(
             all_positions_gt,
             particle_types,
             n_frames,
+            particle_spacing,
+            marker_scale,
             output_path,
             save_as_html,
             data,
@@ -83,6 +142,8 @@ def visualize_rollout(
             all_positions_gt,
             particle_types,
             n_frames,
+            particle_spacing,
+            marker_scale,
             output_path,
             save_as_html,
             data,
@@ -96,6 +157,8 @@ def visualize_2d(
     positions_gt: np.ndarray,
     particle_types: np.ndarray,
     n_frames: int,
+    particle_spacing: float | None,
+    marker_scale: float,
     output_path: Path | None,
     save_as_html: bool,
     data: dict,
@@ -112,37 +175,35 @@ def visualize_2d(
     x_min, x_max = all_pos[..., 0].min() - 1, all_pos[..., 0].max() + 1
     y_min, y_max = all_pos[..., 1].min() - 1, all_pos[..., 1].max() + 1
 
-    # 初期化（粒子サイズを小さく、透明度を上げて見やすく）
-    particle_size = 5  # サイズを20から5に縮小
-    particle_alpha = 0.8  # 透明度を少し上げる
-    
+    particle_size = _compute_marker_size(particle_spacing, marker_scale)
+    particle_alpha = 0.9
+    scatter_kwargs = dict(s=particle_size, alpha=particle_alpha, linewidths=0)
+
     if colors is None:
         sc1 = ax1.scatter(
-            positions_pred[0, :, 0], positions_pred[0, :, 1], 
-            s=particle_size, alpha=particle_alpha, edgecolors='none'
+            positions_pred[0, :, 0],
+            positions_pred[0, :, 1],
+            **scatter_kwargs,
         )
         sc2 = ax2.scatter(
-            positions_gt[0, :, 0], positions_gt[0, :, 1], 
-            s=particle_size, alpha=particle_alpha, edgecolors='none'
+            positions_gt[0, :, 0],
+            positions_gt[0, :, 1],
+            **scatter_kwargs,
         )
     else:
         sc1 = ax1.scatter(
             positions_pred[0, :, 0],
             positions_pred[0, :, 1],
-            s=particle_size,
             c=colors,
             cmap="tab20",
-            alpha=particle_alpha,
-            edgecolors='none',
+            **scatter_kwargs,
         )
         sc2 = ax2.scatter(
             positions_gt[0, :, 0],
             positions_gt[0, :, 1],
-            s=particle_size,
             c=colors,
             cmap="tab20",
-            alpha=particle_alpha,
-            edgecolors='none',
+            **scatter_kwargs,
         )
 
     ax1.set_xlim(x_min, x_max)
@@ -214,6 +275,8 @@ def visualize_3d(
     positions_gt: np.ndarray,
     particle_types: np.ndarray,
     n_frames: int,
+    particle_spacing: float | None,
+    marker_scale: float,
     output_path: Path | None,
     save_as_html: bool,
     data: dict,
@@ -235,9 +298,9 @@ def visualize_3d(
     y_min, y_max = all_pos[..., 1].min() - 1, all_pos[..., 1].max() + 1
     z_min, z_max = all_pos[..., 2].min() - 1, all_pos[..., 2].max() + 1
 
-    # 粒子サイズを小さく設定
-    particle_size = 5
+    particle_size = _compute_marker_size(particle_spacing, marker_scale)
     particle_alpha = 0.8
+    scatter_kwargs = dict(s=particle_size, alpha=particle_alpha, edgecolors="none", linewidths=0)
 
     # 初期化
     if colors is None:
@@ -245,38 +308,30 @@ def visualize_3d(
             positions_pred[0, :, 0],
             positions_pred[0, :, 1],
             positions_pred[0, :, 2],
-            s=particle_size,
-            alpha=particle_alpha,
-            edgecolors='none',
+            **scatter_kwargs,
         )
         sc2 = ax2.scatter(
             positions_gt[0, :, 0],
             positions_gt[0, :, 1],
             positions_gt[0, :, 2],
-            s=particle_size,
-            alpha=particle_alpha,
-            edgecolors='none',
+            **scatter_kwargs,
         )
     else:
         sc1 = ax1.scatter(
             positions_pred[0, :, 0],
             positions_pred[0, :, 1],
             positions_pred[0, :, 2],
-            s=particle_size,
             c=colors,
             cmap="tab20",
-            alpha=particle_alpha,
-            edgecolors='none',
+            **scatter_kwargs,
         )
         sc2 = ax2.scatter(
             positions_gt[0, :, 0],
             positions_gt[0, :, 1],
             positions_gt[0, :, 2],
-            s=particle_size,
             c=colors,
             cmap="tab20",
-            alpha=particle_alpha,
-            edgecolors='none',
+            **scatter_kwargs,
         )
 
     ax1.set_xlim(x_min, x_max)
@@ -389,4 +444,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

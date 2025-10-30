@@ -1,0 +1,19 @@
+# Dataset generation configuration
+output_dir: ./datasets/out
+num_train_scenes: 1000
+num_valid_scenes: 100
+
+# Simulation settings
+timesteps: 240
+dt: 0.008333333333333333
+substeps: 4
+rigid_count_range: [2, 5]
+gravity: [0.0, -9.81]
+
+# Sampling density (controls interior and boundary particles)
+particle_density: 50.0 # particles per square unit; larger -> denser
+wall_density_scale: 1.0 # density multiplier for walls (segments)
+visualization_marker_scale: 0.5 # marker size multiplier used in animations
+
+# Randomness
+seed: 42
