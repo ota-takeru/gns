@@ -89,6 +89,13 @@ done
 
 - `--output PATH`: 出力ファイルのパス（.html, .gif, .mp4 など）
 - `--html`: HTML 形式で保存（強制）
+
+推論時に生成するシーン数を制限したい場合は、`config_rollout.yaml` に以下を設定します。
+
+```
+rollout_inference_max_examples: 3  # 例: 先頭3シーンのみ生成
+```
+この設定により `rollouts/rollout_ex{i}.pkl` の生成数が最大 N 件に制限され、可視化対象もその範囲になります。
 - `--no-initial`: 初期位置を表示しない
 
 **可視化の特徴:**

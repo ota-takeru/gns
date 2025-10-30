@@ -1,25 +1,15 @@
-mode: rollout # train / valid / rollout
-data_path: ./datasets/out/ # train.npz / valid.npz / test.npz を置くディレクトリ
-model_path: ./models/ # モデルやtrain_stateの保存先
-output_path: ./rollouts/
-output_filename: rollout
+mode: rollout # 推論モード
 
-batch_size: 4
-noise_std: 0.0003
+# 入出力パス
+data_path: ./datasets/out/           # test.npz を置くディレクトリ
+model_path: ./models/                # 学習済みモデルの格納先
+output_path: ./rollouts/             # 推論結果(pklなど)の出力先
+output_filename: rollout             # 出力ファイル名の接頭辞
 
-# トレーニング
-ntraining_steps: 20000000
-validation_interval: 5000 # 例: 5000 にするとステップごとに簡易valid
-nsave_steps: 5000
+# 使用するモデル（latest で最新モデル）
+model_file: latest
 
-# 学習率（指数減衰）
-lr_init: 0.0001
-lr_decay: 0.1
-lr_decay_steps: 5000000
-
-# 再開関連（"latest" で自動復帰 / null なら新規）
-model_file: latest # 最新のモデルを使用
-train_state_file: null
-
-# GPU選択（null で自動）
-cuda_device_number: null
+# 推論（rollout）時の制御
+rollout_inference_max_examples: null # 生成するシーン（pkl）数の上限。null で全件
+noise_std: 0.0003                    # 正規化統計用のノイズ設定（推論で参照）
+cuda_device_number: null             # null で自動選択

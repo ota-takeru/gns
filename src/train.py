@@ -51,6 +51,8 @@ class Config:
     rollout_interval: int | None = None
     rollout_max_examples: int = 1
     rollout_dataset: str | None = None
+    # rollout(推論)時に保存するシーン数の上限(Noneで全件)
+    rollout_inference_max_examples: int | None = None
     train_dataset_fraction: float | None = None
     valid_dataset_fraction: float | None = None
     train_dataset_count: int | None = None
@@ -159,6 +161,7 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "rollout_interval": cfg.rollout_interval,
         "rollout_max_examples": cfg.rollout_max_examples,
         "rollout_dataset": cfg.rollout_dataset,
+        "rollout_inference_max_examples": cfg.rollout_inference_max_examples,
         "train_dataset_fraction": cfg.train_dataset_fraction,
         "valid_dataset_fraction": cfg.valid_dataset_fraction,
         "train_dataset_count": cfg.train_dataset_count,
@@ -527,6 +530,16 @@ def predict(cfg: Config, device: torch.device):
     eval_loss = []
     with torch.no_grad():
         for example_i, features in enumerate(ds):
+            # 推論で生成・可視化するシーン数の上限が設定されていれば適用
+            if (
+                cfg.mode == "rollout"
+                and cfg.rollout_inference_max_examples is not None
+                and example_i >= int(cfg.rollout_inference_max_examples)
+            ):
+                print(
+                    f"Reached rollout_inference_max_examples={cfg.rollout_inference_max_examples}. Stopping."
+                )
+                break
             print(f"processing example number {example_i}")
             positions = features[0].to(device)
             # nsteps 計算
