@@ -96,7 +96,9 @@ def _ensure_config(path: Path, label: str) -> Path:
 def generate_dataset(config_path: Path) -> None:
     """Run the PySPH-based fluid dataset generator."""
     cfg = _ensure_config(config_path, "Dataset config")
-    _run_command([sys.executable, "datasets/scripts/gen_fluid.py", "--config", str(cfg)])
+    _run_command(
+        [sys.executable, "-m", "datasets.scripts.gen_fluid", "--config", str(cfg)]
+    )
 
 
 def train_model(config_path: Path) -> None:

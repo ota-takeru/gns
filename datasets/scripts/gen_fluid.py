@@ -10,7 +10,7 @@ import numpy as np
 import yaml
 
 try:
-    from datasets.scripts import dataset_utils
+    from . import dataset_utils
 except ImportError:  # pragma: no cover
     import sys
 
