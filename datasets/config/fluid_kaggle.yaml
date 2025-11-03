@@ -1,4 +1,4 @@
-output_root: ./datasets/out_fluid_kaggle
+output_root: "./datasets/out_fluid_kaggle"
 
 defaults:
   timesteps: 120
