@@ -29,8 +29,11 @@ uv run python src/train.py --config config_rollout.yaml
 
 - `mode: rollout`: rollout モードで実行
 - `model_file: latest`: 最新のモデルを使用
-- `data_path`: テストデータの場所（test.npz または valid.npz）
+- `scenario`: 使用するデータセット（例: `rigid` / `fluid`）。未指定の場合は `data_path` を参照
+- `data_path`: 既定のデータセット場所（シナリオがパスを上書きする場合もあります）
 - `output_path`: 結果の保存先
+
+`scenario_options` を設定することで、新しい推論ケース（例: 別の流体ケース）を追加し、`scenario` の値を切り替えるだけで簡単に入力データを交換できます。
 
 ### 2. 結果の分析
 
