@@ -25,6 +25,7 @@ class DatasetConfig:
     wall_density_scale: float = 1.0  # 壁の密度スケール（1.0で同じ密度）
     gravity: tuple[float, float] = field(default_factory=lambda: (0.0, -9.81))
     visualization_marker_scale: float = 1.0  # 可視化時のマーカーサイズ倍率
+    boundary_clamp_limit: float = 1.0  # 壁距離特徴のクリップ上限
     seed: int = 42
 
 
@@ -63,8 +64,9 @@ def make_space(g=(0.0, -9.81)):
 
 
 def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
-    """壁を剛体として追加（粒子表現のため）- STATICボディとして固定"""
+    """壁を剛体として追加（物理計算用）。距離計算向けに境界情報も返す。"""
     walls = []
+    bounds = np.array([[left, right], [bottom, top]], dtype=np.float32)
 
     # 床 - STATIC bodyとして作成（完全に固定）
     floor_body = pymunk.Body(body_type=pymunk.Body.STATIC)
@@ -93,7 +95,7 @@ def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
     space.add(right_body, right_shape)
     walls.append((right_body, right_shape))
 
-    return walls
+    return walls, bounds
 
 
 def add_random_rigid(space, rng: random.Random, x_range=(-3, 3), y=5.0):
@@ -238,7 +240,7 @@ def _density_to_spacing(particle_density: float) -> float:
 
 def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
     space = make_space(cfg.gravity)
-    walls = add_wall_as_rigid(space)
+    walls, bounds = add_wall_as_rigid(space)
 
     # 剛体生成（落下する物体）
     rigid_min, rigid_max = cfg.rigid_count_range
@@ -248,42 +250,18 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
     nb = rng.randint(rigid_min, rigid_max)
     bodies, local_pts = [], []
     particle_spacing = _density_to_spacing(cfg.particle_density)
-    wall_spacing = (
-        particle_spacing / cfg.wall_density_scale
-        if cfg.wall_density_scale > 0
-        else particle_spacing
-    )
     for _ in range(nb):
         b, s = add_random_rigid(space, rng=rng)
         bodies.append(b)
         local_pts.append(sample_shape_points(s, spacing=particle_spacing, include_interior=True))
 
-    # 壁も剛体として扱う
-    wall_bodies = []
-    wall_local_pts = []
-    for wall_body, wall_shape in walls:
-        wall_bodies.append(wall_body)
-        wall_local_pts.append(
-            sample_shape_points(wall_shape, spacing=wall_spacing, include_interior=False)
-        )
-
-    # 全剛体をentriesに追加（落下する物体 + 壁）
+    # 全剛体をentriesに追加（落下する物体のみ）
     entries = []
-    N = 0
-
-    # 落下する剛体
+    N = 0  # 合計粒子数（壁は含めない）
     for rigid_idx, (body, pts_local) in enumerate(zip(bodies, local_pts)):
         if len(pts_local) == 0:
             continue
         entries.append((body, pts_local, rigid_idx))
-        N += len(pts_local)
-
-    # 壁の剛体
-    for wall_idx, (wall_body, pts_local) in enumerate(zip(wall_bodies, wall_local_pts)):
-        if len(pts_local) == 0:
-            continue
-        wall_rigid_id = nb + wall_idx
-        entries.append((wall_body, pts_local, wall_rigid_id))
         N += len(pts_local)
 
     T = cfg.timesteps
@@ -310,9 +288,7 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
 
             idx += len(pts_local)
 
-    # 壁の粒子数を計算
-    wall_particles = sum(len(pts) for pts in wall_local_pts)
-    dynamic_particles = N - wall_particles
+    dynamic_particles = N
 
     meta = dict(
         seed=scene_seed,
@@ -321,22 +297,24 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
         total_rigids=len(bodies) + len(walls),  # 総剛体数
         dt=dt,
         substeps=substeps,
-        note="pymunk random drop scene with walls as rigids",
-        wall_particles=int(wall_particles),
+        note="pymunk random drop scene with static wall boundaries",
+        wall_particles=0,
         dynamic_particles=int(dynamic_particles),
         particle_density=float(cfg.particle_density),
         particle_spacing=float(particle_spacing),
         wall_density_scale=float(cfg.wall_density_scale),
         visualization_marker_scale=float(cfg.visualization_marker_scale),
         timesteps=int(T),
+        bounds=bounds.tolist(),
+        boundary_augment=float(cfg.boundary_clamp_limit),
     )
     return positions, rigid_ids, meta
 
 
 def _extract_all_positions_with_types(positions, rigid_ids, n_dynamic_rigid):
-    """Extract all positions and assign particle types (0=dynamic, 3=kinematic/wall)."""
-    # Dynamic particles: particle_type = 0
-    # Wall particles: particle_type = 3 (KINEMATIC_PARTICLE_ID)
+    """Extract all positions and assign particle types (0=dynamic)."""
+    # Wall interactions are modelled via distance-to-boundary features, but we keep the
+    # kinematic type ID reserved for backward compatibility with downstream code.
     particle_types = np.where(rigid_ids < n_dynamic_rigid, 0, 3).astype(np.int32)
     return positions.astype(np.float32, copy=False), particle_types
 
@@ -433,6 +411,7 @@ def export_dataset(
         16  # Must match particle_type_embedding_size in simulator.
     )
     velocity_feature_dim = dim * (input_sequence_length - 1)
+    boundary_feature_dim = dim * 2
     metadata = {
         "dim": int(trajectories[0].shape[-1]),
         "sequence_length": int(trajectories[0].shape[0]),
@@ -442,8 +421,11 @@ def export_dataset(
         "vel_std": vel_std.tolist(),
         "acc_mean": acc_mean.tolist(),
         "acc_std": acc_std.tolist(),
-        "nnode_in": int(velocity_feature_dim + particle_type_embedding),
+        "nnode_in": int(
+            velocity_feature_dim + boundary_feature_dim + particle_type_embedding
+        ),
         "nedge_in": int(dim + 1),
+        "boundary_feature_dim": int(boundary_feature_dim),
     }
     if extra_metadata:
         metadata.update(extra_metadata)
@@ -514,6 +496,8 @@ def main(
                     "particle_density",
                     "wall_density_scale",
                     "visualization_marker_scale",
+                    "bounds",
+                    "boundary_augment",
                 )
                 if key in last_meta
             }

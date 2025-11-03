@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
-from tqdm import tqdm
 import yaml
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 import data_loader
 
@@ -372,6 +373,21 @@ def _get_simulator(
         nnode_in = 37 if metadata["dim"] == 3 else 30
         nedge_in = metadata["dim"] + 1
 
+    if "bounds" not in metadata:
+        msg = (
+            "Dataset metadata is missing 'bounds'. "
+            "Regenerate the dataset with wall-distance features."
+        )
+        raise KeyError(msg)
+    boundaries = np.asarray(metadata["bounds"], dtype=np.float32)
+    if boundaries.ndim != 2 or boundaries.shape[1] != 2:
+        msg = (
+            f"Invalid bounds shape {boundaries.shape}, expected (dim, 2). "
+            "Check dataset generation."
+        )
+        raise ValueError(msg)
+    boundary_clamp_limit = float(metadata.get("boundary_augment", 1.0))
+
     simulator = learned_simulator.LearnedSimulator(
         particle_dimensions=metadata["dim"],
         nnode_in=nnode_in,
@@ -381,11 +397,11 @@ def _get_simulator(
         nmlp_layers=2,
         mlp_hidden_dim=128,
         connectivity_radius=metadata["default_connectivity_radius"],
-        # boundaries=np.array(metadata["bounds"]),
         normalization_stats=normalization_stats,
         nparticle_types=NUM_PARTICLE_TYPES,
         particle_type_embedding_size=16,
-        # boundary_clamp_limit=metadata.get("boundary_augment", 1.0),
+        boundaries=boundaries,
+        boundary_clamp_limit=boundary_clamp_limit,
         device=device,
     )
     return simulator
@@ -746,7 +762,9 @@ def train(cfg: Config, device: torch.device):
 
     rollout_evaluator: RolloutEvaluator | None = None
     rollout_interval = (
-        int(cfg.rollout_interval) if cfg.rollout_interval and cfg.rollout_interval > 0 else None
+        int(cfg.rollout_interval)
+        if cfg.rollout_interval and cfg.rollout_interval > 0
+        else None
     )
     if rollout_interval is not None:
         rollout_dataset_path = _resolve_rollout_dataset_path(cfg)
@@ -816,7 +834,9 @@ def train(cfg: Config, device: torch.device):
                     latest_valid_loss_value = float(valid_loss.item())
                     print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
                     if tb_writer is not None:
-                        tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+                        tb_writer.add_scalar(
+                            "valid/loss", latest_valid_loss_value, step
+                        )
 
                 if (
                     rollout_evaluator is not None
@@ -918,7 +938,9 @@ def train(cfg: Config, device: torch.device):
                     if last_grad_norm is not None:
                         tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
                     if latest_valid_loss_value is not None:
-                        tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+                        tb_writer.add_scalar(
+                            "valid/loss", latest_valid_loss_value, step
+                        )
                     if (
                         latest_rollout_metrics is not None
                         and latest_rollout_metrics.get("rollout_rmse_mean") is not None
@@ -977,7 +999,9 @@ def train(cfg: Config, device: torch.device):
                     f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
                 )
                 if tb_writer is not None:
-                    tb_writer.add_scalar("epoch/valid_loss", epoch_valid_loss_float, epoch)
+                    tb_writer.add_scalar(
+                        "epoch/valid_loss", epoch_valid_loss_float, epoch
+                    )
             else:
                 print(f"[epoch {epoch}] train={epoch_avg:.6f}")
             if tb_writer is not None:
