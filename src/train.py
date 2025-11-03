@@ -1168,7 +1168,12 @@ def main():
         print("  scenario_options: (none)")
 
     base_dataset = Path(cfg.data_path).expanduser().resolve()
-    registry = ScenarioRegistry(base_dataset, cfg.scenario_options)
+    default_aliases = [cfg.scenario]
+    if cfg.scenario != "rigid":
+        default_aliases.append("rigid")
+    registry = ScenarioRegistry(
+        base_dataset, cfg.scenario_options, default_keys=default_aliases
+    )
     scenario = registry.get(cfg.scenario)
     scenario.apply_overrides(cfg)
     cfg.data_path = str(scenario.dataset_dir)

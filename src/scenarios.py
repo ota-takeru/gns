@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Iterable, Mapping
 
 
 @dataclass(frozen=True)
@@ -41,11 +41,13 @@ class ScenarioRegistry:
         self,
         default_dataset: Path,
         custom_map: Mapping[str, Mapping[str, Any]] | None = None,
+        default_keys: Iterable[str] | None = None,
     ) -> None:
         self._default_dataset = default_dataset
         self._scenarios: Dict[str, Scenario] = {}
-        # Default rigid-body dataset mirrors legacy behaviour.
-        self.register("rigid", {"dataset": default_dataset})
+        aliases = list(dict.fromkeys(default_keys or ("fluid", "rigid")))
+        for alias in aliases:
+            self.register(alias, {"dataset": default_dataset})
         if custom_map:
             for key, spec in custom_map.items():
                 self.register(key, spec)
