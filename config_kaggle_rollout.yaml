@@ -1,0 +1,16 @@
+mode: rollout
+
+data_path: ./kaggle_output/out_fluid/
+scenario: fluid
+scenario_options:
+  fluid:
+    dataset: ./kaggle_output/out_fluid/dam_break_left
+    rollout_dataset: valid
+model_path: ./kaggle_models/
+output_path: ./kaggle_rollouts/
+output_filename: rollout
+
+model_file: latest
+rollout_inference_max_examples: 4
+noise_std: 0.0003
+cuda_device_number: null
