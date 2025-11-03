@@ -1,10 +1,10 @@
 mode: rollout
 
-data_path: ./kaggle_output/out_fluid/
+data_path: ./datasets/out_fluid_kaggle/
 scenario: fluid
 scenario_options:
   fluid:
-    dataset: ./kaggle_output/out_fluid/dam_break_left
+    dataset: ./datasets/out_fluid_kaggle/dam_break_left
     rollout_dataset: valid
 model_path: ./kaggle_models/
 output_path: ./kaggle_rollouts/

@@ -1151,6 +1151,22 @@ def main():
     args = p.parse_args()
 
     cfg = load_config(args.config)
+    try:
+        resolved_cfg_path = Path(args.config).expanduser()
+        if not resolved_cfg_path.is_absolute():
+            resolved_cfg_path = (Path.cwd() / resolved_cfg_path).resolve()
+        else:
+            resolved_cfg_path = resolved_cfg_path.resolve()
+    except Exception:
+        resolved_cfg_path = Path(args.config)
+    print(f"config: {resolved_cfg_path}")
+    print(f"  mode={cfg.mode} data_path={cfg.data_path} scenario={cfg.scenario}")
+    if cfg.scenario_options:
+        option_keys = ", ".join(sorted(cfg.scenario_options))
+        print(f"  scenario_options: {option_keys}")
+    else:
+        print("  scenario_options: (none)")
+
     base_dataset = Path(cfg.data_path).expanduser().resolve()
     registry = ScenarioRegistry(base_dataset, cfg.scenario_options)
     scenario = registry.get(cfg.scenario)
