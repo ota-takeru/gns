@@ -37,8 +37,8 @@ KINEMATIC_PARTICLE_ID = 3
 @dataclass
 class Config:
     mode: str = "train"  # train / valid / rollout
-    data_path: str = "./data/"
-    scenario: str = "rigid"
+    data_path: str = "./datasets/"
+    scenario: str = "fluid"
     scenario_options: dict[str, dict[str, Any]] = field(default_factory=dict)
     active_scenario: Scenario | None = field(default=None, repr=False)
     model_path: str = "./models/"
