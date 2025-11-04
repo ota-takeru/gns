@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 from torch_geometric.nn import radius_graph
@@ -19,6 +20,8 @@ class LearnedSimulator(nn.Module):
         normalization_stats: dict,  # 正規化のための統計情報
         nparticle_types: int,  # 粒子の種類数
         particle_type_embedding_size: int,  # 粒子タイプ埋め込みの次元数
+        boundaries: np.ndarray,
+        boundary_clamp_limit: float = 1.0,
         device: torch.device | str = "cpu",
     ) -> None:
         super().__init__()
@@ -37,6 +40,12 @@ class LearnedSimulator(nn.Module):
             nmlp_layers=nmlp_layers,
             mlp_hidden_dim=mlp_hidden_dim,
         )
+        boundaries_arr = np.asarray(boundaries, dtype=np.float32)
+        if boundaries_arr.ndim != 2 or boundaries_arr.shape[1] != 2:
+            msg = f"Expected boundaries with shape (dim, 2); got {boundaries_arr.shape}"
+            raise ValueError(msg)
+        self._boundaries = boundaries_arr
+        self._boundary_clamp_limit = boundary_clamp_limit
         self._device = device
 
     def forward(self):
@@ -131,6 +140,21 @@ class LearnedSimulator(nn.Module):
         ) / velocity_stats["std"]
         flat_velocity_sequence = normalized_velocity_sequence.view(nparticles, -1)
         node_features_list.append(flat_velocity_sequence)
+
+        boundaries = (
+            torch.tensor(self._boundaries, requires_grad=False).float().to(self._device)
+        )
+        distance_to_lower_boundary = most_recent_position - boundaries[:, 0][None]
+        distance_to_upper_boundary = boundaries[:, 1][None] - most_recent_position
+        distance_to_boundaries = torch.cat(
+            [distance_to_lower_boundary, distance_to_upper_boundary], dim=1
+        )
+        normalized_clipped_distance_to_boundaries = torch.clamp(
+            distance_to_boundaries / self._connectivity_radius,
+            -self._boundary_clamp_limit,
+            self._boundary_clamp_limit,
+        )
+        node_features_list.append(normalized_clipped_distance_to_boundaries)
 
         # 粒子タイプの埋め込みを計算
         if self._nparticle_types > 1:

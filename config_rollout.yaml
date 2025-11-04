@@ -1,15 +1,22 @@
 mode: rollout # 推論モード
 
 # 入出力パス
-data_path: ./datasets/out/           # test.npz を置くディレクトリ
-model_path: ./models/                # 学習済みモデルの格納先
-output_path: ./rollouts/             # 推論結果(pklなど)の出力先
-output_filename: rollout             # 出力ファイル名の接頭辞
+data_path: ./datasets/out/ # test.npz を置くディレクトリ
+scenario: fluid
+scenario_options:
+  rigid:
+    dataset: ./datasets/out
+  fluid:
+    dataset: ./datasets/out_fluid/dam_break_left
+    rollout_dataset: valid
+model_path: ./models/ # 学習済みモデルの格納先
+output_path: ./rollouts/ # 推論結果(pklなど)の出力先
+output_filename: rollout # 出力ファイル名の接頭辞
 
 # 使用するモデル（latest で最新モデル）
 model_file: latest
 
 # 推論（rollout）時の制御
-rollout_inference_max_examples: null # 生成するシーン（pkl）数の上限。null で全件
-noise_std: 0.0003                    # 正規化統計用のノイズ設定（推論で参照）
-cuda_device_number: null             # null で自動選択
+rollout_inference_max_examples: 2 # 生成するシーン（pkl）数の上限。null で全件
+noise_std: 0.0003 # 正規化統計用のノイズ設定（推論で参照）
+cuda_device_number: null # null で自動選択

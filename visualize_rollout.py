@@ -169,11 +169,29 @@ def visualize_2d(
     # カラーマップの設定
     unique_types = np.unique(particle_types)
     colors = particle_types if len(unique_types) > 1 else None
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    bounds = None
+    if metadata and isinstance(metadata, dict):
+        raw_bounds = metadata.get("bounds")
+        if raw_bounds is not None:
+            bounds_arr = np.asarray(raw_bounds, dtype=float)
+            if bounds_arr.ndim == 2 and bounds_arr.shape[0] >= 2:
+                bounds = bounds_arr
 
     # 軸の範囲を設定（余白を広めに）
     all_pos = np.concatenate([positions_pred, positions_gt], axis=0)
-    x_min, x_max = all_pos[..., 0].min() - 1, all_pos[..., 0].max() + 1
-    y_min, y_max = all_pos[..., 1].min() - 1, all_pos[..., 1].max() + 1
+    if bounds is not None:
+        x_min, x_max = float(bounds[0, 0]), float(bounds[0, 1])
+        y_min, y_max = float(bounds[1, 0]), float(bounds[1, 1])
+        margin_x = max(0.1, 0.05 * max(1e-6, x_max - x_min))
+        margin_y = max(0.1, 0.05 * max(1e-6, y_max - y_min))
+        x_min -= margin_x
+        x_max += margin_x
+        y_min -= margin_y
+        y_max += margin_y
+    else:
+        x_min, x_max = all_pos[..., 0].min() - 1, all_pos[..., 0].max() + 1
+        y_min, y_max = all_pos[..., 1].min() - 1, all_pos[..., 1].max() + 1
 
     particle_size = _compute_marker_size(particle_spacing, marker_scale)
     particle_alpha = 0.9
@@ -206,31 +224,30 @@ def visualize_2d(
             **scatter_kwargs,
         )
 
-    ax1.set_xlim(x_min, x_max)
-    ax1.set_ylim(y_min, y_max)
-    ax1.set_aspect("equal")
-    ax1.set_title("Predicted", fontsize=12)
-    ax1.set_xlabel("x", fontsize=10)
-    ax1.set_ylabel("y", fontsize=10)
-    ax1.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-    
-    # 壁の位置を示す線を追加
-    ax1.axhline(y=0, color='gray', linestyle='-', linewidth=2, alpha=0.5, label='Floor')
-    ax1.axvline(x=-5, color='gray', linestyle='-', linewidth=2, alpha=0.5, label='Left Wall')
-    ax1.axvline(x=5, color='gray', linestyle='-', linewidth=2, alpha=0.5, label='Right Wall')
+    def _configure_axis(axis: plt.Axes, title: str):
+        axis.set_xlim(x_min, x_max)
+        axis.set_ylim(y_min, y_max)
+        axis.set_aspect("equal")
+        axis.set_title(title, fontsize=12)
+        axis.set_xlabel("x", fontsize=10)
+        axis.set_ylabel("y", fontsize=10)
+        axis.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+        if bounds is not None:
+            rect = plt.Rectangle(
+                (float(bounds[0, 0]), float(bounds[1, 0])),
+                float(bounds[0, 1] - bounds[0, 0]),
+                float(bounds[1, 1] - bounds[1, 0]),
+                fill=False,
+                linestyle="--",
+                linewidth=1.5,
+                edgecolor="gray",
+                alpha=0.8,
+                label="Boundary",
+            )
+            axis.add_patch(rect)
 
-    ax2.set_xlim(x_min, x_max)
-    ax2.set_ylim(y_min, y_max)
-    ax2.set_aspect("equal")
-    ax2.set_title("Ground Truth", fontsize=12)
-    ax2.set_xlabel("x", fontsize=10)
-    ax2.set_ylabel("y", fontsize=10)
-    ax2.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-    
-    # 壁の位置を示す線を追加
-    ax2.axhline(y=0, color='gray', linestyle='-', linewidth=2, alpha=0.5)
-    ax2.axvline(x=-5, color='gray', linestyle='-', linewidth=2, alpha=0.5)
-    ax2.axvline(x=5, color='gray', linestyle='-', linewidth=2, alpha=0.5)
+    _configure_axis(ax1, "Predicted")
+    _configure_axis(ax2, "Ground Truth")
 
     # ロス情報を表示
     if "loss" in data:

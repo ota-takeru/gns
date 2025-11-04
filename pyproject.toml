@@ -8,6 +8,7 @@ dependencies = [
     "h5py>=3.14.0",
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
+    "pysph>=1.0b2",
     "pymunk>=7.1.0",
     "pyyaml>=6.0.2",
     "ruff>=0.14.1",

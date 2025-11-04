@@ -1,19 +1,20 @@
-import glob
 import json
 import math
 import pickle
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
-from tqdm import tqdm
 import yaml
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 import data_loader
+from scenarios import Scenario, ScenarioRegistry
 
 # --- gns モジュール群(あなたの環境のパスに応じて調整してください) ---
 import learned_simulator
@@ -36,7 +37,10 @@ KINEMATIC_PARTICLE_ID = 3
 @dataclass
 class Config:
     mode: str = "train"  # train / valid / rollout
-    data_path: str = "./data/"
+    data_path: str = "./datasets/"
+    scenario: str = "fluid"
+    scenario_options: dict[str, dict[str, Any]] = field(default_factory=dict)
+    active_scenario: Scenario | None = field(default=None, repr=False)
     model_path: str = "./models/"
     output_path: str = "./rollouts/"
     output_filename: str = "rollout"
@@ -63,7 +67,7 @@ class Config:
     lr_decay: float = 0.1
     lr_decay_steps: int = int(5e6)
 
-    model_file: str | None = None  # "latest" or ファイル名 or null
+    model_file: str | None = None  # "latest" (inference default) or ファイル名 or null
     train_state_file: str | None = "train_state.pt"  # "latest" or ファイル名 or null
 
     cuda_device_number: int | None = None  # null で自動選択
@@ -149,6 +153,16 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
     return {
         "mode": cfg.mode,
         "data_path": cfg.data_path,
+        "scenario": cfg.scenario,
+        "scenario_options": cfg.scenario_options,
+        "active_scenario": (
+            {
+                "key": cfg.active_scenario.key,
+                "dataset_dir": str(cfg.active_scenario.dataset_dir),
+            }
+            if cfg.active_scenario
+            else None
+        ),
         "model_path": cfg.model_path,
         "output_path": cfg.output_path,
         "output_filename": cfg.output_filename,
@@ -332,6 +346,11 @@ def _resolve_rollout_dataset_path(cfg: Config) -> Path | None:
         candidate = base / f"{cfg.rollout_dataset}.npz"
         if candidate.exists():
             return candidate
+    scenario = cfg.active_scenario
+    if scenario and scenario.rollout_dataset:
+        candidate = base / f"{scenario.rollout_dataset}.npz"
+        if candidate.exists():
+            return candidate
     for split_name in ("valid", "test", "train"):
         candidate = base / f"{split_name}.npz"
         if candidate.exists():
@@ -372,6 +391,21 @@ def _get_simulator(
         nnode_in = 37 if metadata["dim"] == 3 else 30
         nedge_in = metadata["dim"] + 1
 
+    if "bounds" not in metadata:
+        msg = (
+            "Dataset metadata is missing 'bounds'. "
+            "Regenerate the dataset with wall-distance features."
+        )
+        raise KeyError(msg)
+    boundaries = np.asarray(metadata["bounds"], dtype=np.float32)
+    if boundaries.ndim != 2 or boundaries.shape[1] != 2:
+        msg = (
+            f"Invalid bounds shape {boundaries.shape}, expected (dim, 2). "
+            "Check dataset generation."
+        )
+        raise ValueError(msg)
+    boundary_clamp_limit = float(metadata.get("boundary_augment", 1.0))
+
     simulator = learned_simulator.LearnedSimulator(
         particle_dimensions=metadata["dim"],
         nnode_in=nnode_in,
@@ -381,11 +415,11 @@ def _get_simulator(
         nmlp_layers=2,
         mlp_hidden_dim=128,
         connectivity_radius=metadata["default_connectivity_radius"],
-        # boundaries=np.array(metadata["bounds"]),
         normalization_stats=normalization_stats,
         nparticle_types=NUM_PARTICLE_TYPES,
         particle_type_embedding_size=16,
-        # boundary_clamp_limit=metadata.get("boundary_augment", 1.0),
+        boundaries=boundaries,
+        boundary_clamp_limit=boundary_clamp_limit,
         device=device,
     )
     return simulator
@@ -496,7 +530,12 @@ def validation(
 
 def predict(cfg: Config, device: torch.device):
     """valid/rollout モードの入口"""
-    metadata = reading_utils.read_metadata(cfg.data_path, "rollout")
+    metadata_key = (
+        cfg.active_scenario.rollout_metadata_split
+        if cfg.active_scenario and cfg.active_scenario.rollout_metadata_split
+        else "rollout"
+    )
+    metadata = reading_utils.read_metadata(cfg.data_path, metadata_key)
     simulator = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
 
     # モデル読み込み
@@ -585,30 +624,74 @@ def predict(cfg: Config, device: torch.device):
     print(f"Mean loss on rollout prediction: {torch.mean(torch.cat(eval_loss))}")
 
 
+def _prepare_model_directory(cfg: Config) -> None:
+    """Ensure model outputs are written to an isolated run directory."""
+    base_dir = Path(cfg.model_path).expanduser().resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stash base directory for later lookup (e.g., inference latest resolution).
+    setattr(cfg, "model_base_path", str(base_dir))
+
+    if cfg.mode == "train" and cfg.model_file is None:
+        timestamp = time.strftime("run-%Y%m%d-%H%M%S")
+        run_dir = base_dir / timestamp
+        counter = 1
+        while run_dir.exists():
+            run_dir = base_dir / f"{timestamp}-{counter:02d}"
+            counter += 1
+        run_dir.mkdir(parents=True, exist_ok=False)
+        run_dir = run_dir.resolve()
+        setattr(cfg, "model_run_path", str(run_dir))
+        cfg.model_path = str(run_dir)
+    else:
+        setattr(cfg, "model_run_path", None)
+        cfg.model_path = str(base_dir)
+
+
 def _resolve_model_path(cfg: Config) -> str:
     """cfg.model_file が 'latest' のとき最新を解決。そうでなければ結合して返す。"""
     Path(cfg.model_path).mkdir(parents=True, exist_ok=True)
-    if cfg.model_file == "latest":
-        fnames = glob.glob(str(Path(cfg.model_path) / "model-*.pt"))
-        if not fnames:
-            msg = f"No model files found in {cfg.model_path}"
+    model_file = cfg.model_file
+    if model_file is None and cfg.mode in ("valid", "rollout"):
+        model_file = "latest"
+
+    base_dir = Path(getattr(cfg, "model_base_path", cfg.model_path)).expanduser().resolve()
+    search_root = base_dir if base_dir.is_dir() else base_dir.parent
+
+    if model_file == "latest":
+        expr = re.compile(r"model-(\d+)\.pt$")
+        candidates: list[tuple[float, int, Path]] = []
+        for path in search_root.rglob("model-*.pt"):
+            match = expr.search(path.name)
+            if not match:
+                continue
+            try:
+                step_num = int(match.group(1))
+            except ValueError:
+                step_num = -1
+            stat = path.stat()
+            candidates.append((stat.st_mtime, step_num, path.resolve()))
+        if not candidates:
+            msg = f"No model files found in {search_root}"
             raise FileNotFoundError(msg)
-        expr = re.compile(r".*model-(\d+)\.pt")
-        latest_num = -1
-        latest_file = None
-        for fname in fnames:
-            m = expr.match(fname)
-            if m:
-                num = int(m.groups()[0])
-                if num > latest_num:
-                    latest_num = num
-                    latest_file = fname
-        if latest_file is None:
-            msg = f"Could not resolve latest model in {cfg.model_path}"
-            raise FileNotFoundError(msg)
-        return latest_file
-    if cfg.model_file:
-        return str(Path(cfg.model_path) / cfg.model_file)
+        candidates.sort()
+        return str(candidates[-1][2])
+    if model_file:
+        candidate = Path(model_file)
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+        search_roots = [Path(cfg.model_path).expanduser().resolve()]
+        if base_dir not in search_roots:
+            search_roots.append(base_dir)
+
+        for root in search_roots:
+            resolved = (root / model_file).expanduser().resolve()
+            if resolved.exists():
+                return str(resolved)
+
+        msg = f"Model file {model_file} not found under {', '.join(str(r) for r in search_roots)}"
+        raise FileNotFoundError(msg)
     # 明示されていない場合新規学習用なので存在しないパスを返す
     return str(Path(cfg.model_path) / "model-init.pt")
 
@@ -618,7 +701,10 @@ def _resolve_model_path(cfg: Config) -> str:
 # -----------------------
 def train(cfg: Config, device: torch.device):
     # メタ情報
-    metadata = reading_utils.read_metadata(cfg.data_path, "train")
+    metadata_key = (
+        cfg.active_scenario.metadata_split if cfg.active_scenario else "train"
+    )
+    metadata = reading_utils.read_metadata(cfg.data_path, metadata_key)
     train_loss = 0.0  # 初期化
 
     # モデルと最適化器
@@ -746,7 +832,9 @@ def train(cfg: Config, device: torch.device):
 
     rollout_evaluator: RolloutEvaluator | None = None
     rollout_interval = (
-        int(cfg.rollout_interval) if cfg.rollout_interval and cfg.rollout_interval > 0 else None
+        int(cfg.rollout_interval)
+        if cfg.rollout_interval and cfg.rollout_interval > 0
+        else None
     )
     if rollout_interval is not None:
         rollout_dataset_path = _resolve_rollout_dataset_path(cfg)
@@ -816,7 +904,9 @@ def train(cfg: Config, device: torch.device):
                     latest_valid_loss_value = float(valid_loss.item())
                     print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
                     if tb_writer is not None:
-                        tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+                        tb_writer.add_scalar(
+                            "valid/loss", latest_valid_loss_value, step
+                        )
 
                 if (
                     rollout_evaluator is not None
@@ -918,7 +1008,9 @@ def train(cfg: Config, device: torch.device):
                     if last_grad_norm is not None:
                         tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
                     if latest_valid_loss_value is not None:
-                        tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+                        tb_writer.add_scalar(
+                            "valid/loss", latest_valid_loss_value, step
+                        )
                     if (
                         latest_rollout_metrics is not None
                         and latest_rollout_metrics.get("rollout_rmse_mean") is not None
@@ -977,7 +1069,9 @@ def train(cfg: Config, device: torch.device):
                     f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
                 )
                 if tb_writer is not None:
-                    tb_writer.add_scalar("epoch/valid_loss", epoch_valid_loss_float, epoch)
+                    tb_writer.add_scalar(
+                        "epoch/valid_loss", epoch_valid_loss_float, epoch
+                    )
             else:
                 print(f"[epoch {epoch}] train={epoch_avg:.6f}")
             if tb_writer is not None:
@@ -1057,6 +1151,43 @@ def main():
     args = p.parse_args()
 
     cfg = load_config(args.config)
+    try:
+        resolved_cfg_path = Path(args.config).expanduser()
+        if not resolved_cfg_path.is_absolute():
+            resolved_cfg_path = (Path.cwd() / resolved_cfg_path).resolve()
+        else:
+            resolved_cfg_path = resolved_cfg_path.resolve()
+    except Exception:
+        resolved_cfg_path = Path(args.config)
+    print(f"config: {resolved_cfg_path}")
+    print(f"  mode={cfg.mode} data_path={cfg.data_path} scenario={cfg.scenario}")
+    if cfg.scenario_options:
+        option_keys = ", ".join(sorted(cfg.scenario_options))
+        print(f"  scenario_options: {option_keys}")
+    else:
+        print("  scenario_options: (none)")
+
+    base_dataset = Path(cfg.data_path).expanduser().resolve()
+    default_aliases = [cfg.scenario]
+    if cfg.scenario != "rigid":
+        default_aliases.append("rigid")
+    registry = ScenarioRegistry(
+        base_dataset, cfg.scenario_options, default_keys=default_aliases
+    )
+    scenario = registry.get(cfg.scenario)
+    scenario.apply_overrides(cfg)
+    cfg.data_path = str(scenario.dataset_dir)
+    if cfg.rollout_dataset is None and scenario.rollout_dataset:
+        cfg.rollout_dataset = scenario.rollout_dataset
+    cfg.active_scenario = scenario
+    print(f"scenario: {scenario.key} @ {scenario.dataset_dir}")
+    if scenario.description:
+        print(f"  description: {scenario.description}")
+
+    _prepare_model_directory(cfg)
+    run_dir = getattr(cfg, "model_run_path", None)
+    if run_dir:
+        print(f"model run directory: {run_dir}")
 
     # デバイス選択
     if torch.cuda.is_available() and cfg.cuda_device_number is not None:

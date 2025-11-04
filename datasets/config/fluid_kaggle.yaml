@@ -1,0 +1,34 @@
+output_root: "./datasets/out_fluid_kaggle"
+
+defaults:
+  timesteps: 120
+  dt: 0.006
+  solver_substeps: 1
+  particle_spacing: 0.16
+  kernel_radius_scale: 2.0
+  rest_density: 1000.0
+  stiffness: 2000.0
+  viscosity: 45.0
+  boundary_damping: 0.35
+  boundary_clamp_limit: 1.0
+  xsph_factor: 0.05
+  position_noise: 0.05
+  gravity: [0.0, -9.81]
+  num_train_scenes: 16
+  num_valid_scenes: 4
+  domain:
+    left: -4.5
+    right: 4.5
+    bottom: 0.0
+    top: 6.0
+  emitter:
+    origin: [-4.0, 0.3]
+    size: [3.5, 3.5]
+    jitter: 0.1
+    initial_velocity: [0.0, 0.0]
+    random_velocity_scale: 0.6
+    fill_ratio_range: [0.85, 1.05]
+
+cases:
+  - name: dam_break_left
+    seed: 100

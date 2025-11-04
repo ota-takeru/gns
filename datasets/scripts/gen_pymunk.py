@@ -11,6 +11,17 @@ import numpy as np
 import pymunk
 import yaml
 
+try:
+    from datasets.scripts import dataset_utils
+except ImportError:  # pragma: no cover
+    import sys
+
+    CURRENT_DIR = Path(__file__).resolve().parent
+    ROOT_DIR = CURRENT_DIR.parent.parent
+    if str(ROOT_DIR) not in sys.path:
+        sys.path.insert(0, str(ROOT_DIR))
+    from datasets.scripts import dataset_utils
+
 
 @dataclass
 class DatasetConfig:
@@ -25,6 +36,7 @@ class DatasetConfig:
     wall_density_scale: float = 1.0  # 壁の密度スケール（1.0で同じ密度）
     gravity: tuple[float, float] = field(default_factory=lambda: (0.0, -9.81))
     visualization_marker_scale: float = 1.0  # 可視化時のマーカーサイズ倍率
+    boundary_clamp_limit: float = 1.0  # 壁距離特徴のクリップ上限
     seed: int = 42
 
 
@@ -63,8 +75,9 @@ def make_space(g=(0.0, -9.81)):
 
 
 def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
-    """壁を剛体として追加（粒子表現のため）- STATICボディとして固定"""
+    """壁を剛体として追加（物理計算用）。距離計算向けに境界情報も返す。"""
     walls = []
+    bounds = np.array([[left, right], [bottom, top]], dtype=np.float32)
 
     # 床 - STATIC bodyとして作成（完全に固定）
     floor_body = pymunk.Body(body_type=pymunk.Body.STATIC)
@@ -93,7 +106,7 @@ def add_wall_as_rigid(space, left=-5, right=5, bottom=0, top=8):
     space.add(right_body, right_shape)
     walls.append((right_body, right_shape))
 
-    return walls
+    return walls, bounds
 
 
 def add_random_rigid(space, rng: random.Random, x_range=(-3, 3), y=5.0):
@@ -238,7 +251,7 @@ def _density_to_spacing(particle_density: float) -> float:
 
 def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
     space = make_space(cfg.gravity)
-    walls = add_wall_as_rigid(space)
+    walls, bounds = add_wall_as_rigid(space)
 
     # 剛体生成（落下する物体）
     rigid_min, rigid_max = cfg.rigid_count_range
@@ -248,42 +261,18 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
     nb = rng.randint(rigid_min, rigid_max)
     bodies, local_pts = [], []
     particle_spacing = _density_to_spacing(cfg.particle_density)
-    wall_spacing = (
-        particle_spacing / cfg.wall_density_scale
-        if cfg.wall_density_scale > 0
-        else particle_spacing
-    )
     for _ in range(nb):
         b, s = add_random_rigid(space, rng=rng)
         bodies.append(b)
         local_pts.append(sample_shape_points(s, spacing=particle_spacing, include_interior=True))
 
-    # 壁も剛体として扱う
-    wall_bodies = []
-    wall_local_pts = []
-    for wall_body, wall_shape in walls:
-        wall_bodies.append(wall_body)
-        wall_local_pts.append(
-            sample_shape_points(wall_shape, spacing=wall_spacing, include_interior=False)
-        )
-
-    # 全剛体をentriesに追加（落下する物体 + 壁）
+    # 全剛体をentriesに追加（落下する物体のみ）
     entries = []
-    N = 0
-
-    # 落下する剛体
+    N = 0  # 合計粒子数（壁は含めない）
     for rigid_idx, (body, pts_local) in enumerate(zip(bodies, local_pts)):
         if len(pts_local) == 0:
             continue
         entries.append((body, pts_local, rigid_idx))
-        N += len(pts_local)
-
-    # 壁の剛体
-    for wall_idx, (wall_body, pts_local) in enumerate(zip(wall_bodies, wall_local_pts)):
-        if len(pts_local) == 0:
-            continue
-        wall_rigid_id = nb + wall_idx
-        entries.append((wall_body, pts_local, wall_rigid_id))
         N += len(pts_local)
 
     T = cfg.timesteps
@@ -310,9 +299,7 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
 
             idx += len(pts_local)
 
-    # 壁の粒子数を計算
-    wall_particles = sum(len(pts) for pts in wall_local_pts)
-    dynamic_particles = N - wall_particles
+    dynamic_particles = N
 
     meta = dict(
         seed=scene_seed,
@@ -321,137 +308,26 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
         total_rigids=len(bodies) + len(walls),  # 総剛体数
         dt=dt,
         substeps=substeps,
-        note="pymunk random drop scene with walls as rigids",
-        wall_particles=int(wall_particles),
+        note="pymunk random drop scene with static wall boundaries",
+        wall_particles=0,
         dynamic_particles=int(dynamic_particles),
         particle_density=float(cfg.particle_density),
         particle_spacing=float(particle_spacing),
         wall_density_scale=float(cfg.wall_density_scale),
         visualization_marker_scale=float(cfg.visualization_marker_scale),
         timesteps=int(T),
+        bounds=bounds.tolist(),
+        boundary_augment=float(cfg.boundary_clamp_limit),
     )
     return positions, rigid_ids, meta
 
 
 def _extract_all_positions_with_types(positions, rigid_ids, n_dynamic_rigid):
-    """Extract all positions and assign particle types (0=dynamic, 3=kinematic/wall)."""
-    # Dynamic particles: particle_type = 0
-    # Wall particles: particle_type = 3 (KINEMATIC_PARTICLE_ID)
+    """Extract all positions and assign particle types (0=dynamic)."""
+    # Wall interactions are modelled via distance-to-boundary features, but we keep the
+    # kinematic type ID reserved for backward compatibility with downstream code.
     particle_types = np.where(rigid_ids < n_dynamic_rigid, 0, 3).astype(np.int32)
     return positions.astype(np.float32, copy=False), particle_types
-
-
-def _compute_differences(sequence):
-    """Compute first-order differences along the time axis without dt scaling."""
-    return sequence[1:] - sequence[:-1]
-
-
-def _collect_statistics(trajectories):
-    """Aggregate velocity/acceleration stats across trajectories for metadata."""
-    velocity_rows = []
-    acceleration_rows = []
-    for pos in trajectories:
-        vel = _compute_differences(pos)
-        if vel.size:
-            velocity_rows.append(vel.reshape(-1, vel.shape[-1]))
-            acc = _compute_differences(vel)
-            if acc.size:
-                acceleration_rows.append(acc.reshape(-1, acc.shape[-1]))
-
-    if velocity_rows:
-        vel_stack = np.concatenate(velocity_rows, axis=0)
-        vel_mean = vel_stack.mean(axis=0)
-        vel_std = vel_stack.std(axis=0)
-    else:
-        vel_mean = vel_std = np.zeros((trajectories[0].shape[-1],), dtype=np.float32)
-
-    if acceleration_rows:
-        acc_stack = np.concatenate(acceleration_rows, axis=0)
-        acc_mean = acc_stack.mean(axis=0)
-        acc_std = acc_stack.std(axis=0)
-    else:
-        acc_mean = acc_std = np.zeros((trajectories[0].shape[-1],), dtype=np.float32)
-
-    return vel_mean, vel_std, acc_mean, acc_std
-
-
-def _estimate_connectivity_radius(trajectories):
-    """Heuristic connectivity radius based on nearest-neighbour distance."""
-    nearest_distances = []
-    for pos in trajectories:
-        frames = pos[: min(5, pos.shape[0])]
-        for frame in frames:
-            n = frame.shape[0]
-            if n < 2:
-                continue
-            diff = frame[:, None, :] - frame[None, :, :]
-            dist = np.sqrt(np.sum(diff**2, axis=-1))
-            dist[np.eye(n, dtype=bool)] = np.inf  # ignore self-distance
-            nn = np.min(dist, axis=1)
-            nn = nn[np.isfinite(nn)]
-            if nn.size:
-                nearest_distances.append(nn)
-
-    if not nearest_distances:
-        return 1.0
-
-    all_nn = np.concatenate(nearest_distances, axis=0)
-    # Use a generous multiplier so that the message graph connects over shapes.
-    return float(np.percentile(all_nn, 90) * 1.5)
-
-
-def export_dataset(
-    trajectories,
-    particle_types_list,
-    out_dir,
-    split,
-    dt,
-    extra_metadata: dict[str, Any] | None = None,
-):
-    """Save aggregated dataset compatible with data_loader along with metadata.
-
-    Note: We store particle_types as an array per trajectory to support mixed types
-    (dynamic and kinematic particles in the same scene).
-    """
-    if not trajectories:
-        raise ValueError("No trajectories provided for dataset export.")
-
-    entries = []
-    for pos, ptypes in zip(trajectories, particle_types_list):
-        # Store particle type array instead of a single value
-        # This allows mixing dynamic (0) and kinematic (3) particles
-        entries.append((pos.astype(np.float32, copy=False), ptypes.astype(np.int32)))
-
-    gns_data = np.array(entries, dtype=object)
-    dataset_path = out_dir / f"{split}.npz"
-    np.savez_compressed(dataset_path, gns_data=gns_data)
-
-    vel_mean, vel_std, acc_mean, acc_std = _collect_statistics(trajectories)
-    dim = int(trajectories[0].shape[-1])
-    input_sequence_length = 6  # Must match INPUT_SEQUENCE_LENGTH in training.
-    particle_type_embedding = (
-        16  # Must match particle_type_embedding_size in simulator.
-    )
-    velocity_feature_dim = dim * (input_sequence_length - 1)
-    metadata = {
-        "dim": int(trajectories[0].shape[-1]),
-        "sequence_length": int(trajectories[0].shape[0]),
-        "dt": float(dt),
-        "default_connectivity_radius": _estimate_connectivity_radius(trajectories),
-        "vel_mean": vel_mean.tolist(),
-        "vel_std": vel_std.tolist(),
-        "acc_mean": acc_mean.tolist(),
-        "acc_std": acc_std.tolist(),
-        "nnode_in": int(velocity_feature_dim + particle_type_embedding),
-        "nedge_in": int(dim + 1),
-    }
-    if extra_metadata:
-        metadata.update(extra_metadata)
-    meta_path = out_dir / "metadata.json"
-    with meta_path.open("w", encoding="utf-8") as fp:
-        json.dump({"train": metadata, "rollout": metadata}, fp, indent=2)
-
-    return dataset_path, meta_path
 
 
 def save_npz(out_dir, scene_idx, positions, rigid_ids, meta, split="train"):
@@ -514,10 +390,12 @@ def main(
                     "particle_density",
                     "wall_density_scale",
                     "visualization_marker_scale",
+                    "bounds",
+                    "boundary_augment",
                 )
                 if key in last_meta
             }
-            dataset_path, meta_path = export_dataset(
+            dataset_path, meta_path = dataset_utils.export_dataset(
                 trajectories,
                 particle_types_list,
                 out_dir,

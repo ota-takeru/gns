@@ -1,3 +1,4 @@
+import argparse
 import json
 import math
 from pathlib import Path
@@ -47,17 +48,75 @@ def _resolve_marker_scale(meta: dict | None, cfg: DatasetConfig) -> float:
     return 1.0
 
 
-def main():
-    cfg, _cfg_path = load_dataset_config()
-    dataset_dir = Path(cfg.output_dir) / "train"
-    scenes = sorted(dataset_dir.glob("scene_*.npz"))
-    if not scenes:
-        raise FileNotFoundError(f"No scene npz files found under {dataset_dir}")
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Animate a dataset scene.")
+    parser.add_argument(
+        "--split",
+        default="train",
+        choices=("train", "valid", "test"),
+        help="Dataset split directory under the output dir (default: train).",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        help="Overrides the dataset output root directory.",
+    )
+    parser.add_argument(
+        "--case",
+        help="Optional case subdirectory under the output root (useful for fluid datasets).",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--scene-index",
+        type=int,
+        default=0,
+        help="0-based index within the split (default: 0).",
+    )
+    group.add_argument(
+        "--scene-path",
+        type=Path,
+        help="Path to a specific scene npz file. If relative, interpreted within the split directory.",
+    )
+    return parser.parse_args()
 
-    dataset_path = scenes[0]
+
+def main():
+    args = _parse_args()
+    cfg, _cfg_path = load_dataset_config()
+    output_root = Path(cfg.output_dir)
+    if args.output_root is not None:
+        output_root = args.output_root
+
+    base_dir = output_root
+    if args.case:
+        base_dir = base_dir / args.case
+
+    split_dir = base_dir / args.split
+
+    if args.scene_path is not None:
+        dataset_path = args.scene_path
+        if not dataset_path.is_absolute():
+            dataset_path = split_dir / dataset_path
+        dataset_path = dataset_path.resolve()
+        if not dataset_path.exists():
+            raise FileNotFoundError(f"Scene file not found: {dataset_path}")
+    else:
+        scenes = sorted(split_dir.glob("scene_*.npz"))
+        if not scenes:
+            raise FileNotFoundError(f"No scene npz files found under {split_dir}")
+        if args.scene_index < 0 or args.scene_index >= len(scenes):
+            raise IndexError(
+                f"scene_index {args.scene_index} out of range for {len(scenes)} scene files"
+            )
+        dataset_path = scenes[args.scene_index]
+
+    dataset_dir = dataset_path.parent
+    print(f"Animating {dataset_path}")
+
     with np.load(dataset_path) as data:
         pos = data["position"]
-        rigid_id = data["rigid_id"]
+        rigid_id = data.get("rigid_id")
+        particle_type = data.get("particle_type")
         meta_raw = data.get("meta")
         meta = None
         if meta_raw is not None:
@@ -67,7 +126,16 @@ def main():
     marker_size = _compute_marker_size(_resolve_particle_spacing(meta, cfg), marker_scale)
 
     fig, ax = plt.subplots()
-    colors = rigid_id if len(np.unique(rigid_id)) > 1 else None
+    colors = None
+    color_source = None
+    if rigid_id is not None:
+        color_source = np.asarray(rigid_id)
+    elif particle_type is not None:
+        color_source = np.asarray(particle_type)
+
+    if color_source is not None and color_source.size > 0:
+        if len(np.unique(color_source)) > 1:
+            colors = color_source
     scatter_kwargs = dict(s=marker_size, alpha=0.9, linewidths=0)
     if colors is None:
         sc = ax.scatter(pos[0, :, 0], pos[0, :, 1], **scatter_kwargs)
