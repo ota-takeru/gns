@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_CONFIG = REPO_ROOT / "datasets" / "config" / "fluid_kaggle.yaml"
 TRAIN_CONFIG = REPO_ROOT / "config_kaggle.yaml"
 ROLLOUT_CONFIG = REPO_ROOT / "config_kaggle_rollout.yaml"
-DEPS_SENTINEL = REPO_ROOT / "kaggle" / ".deps_installed"
+DEPS_SENTINEL = REPO_ROOT / "gns_kaggle" / ".deps_installed"
 
 
 def _run_command(cmd: Sequence[str], env: dict[str, str] | None = None) -> None:
