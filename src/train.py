@@ -493,16 +493,16 @@ def rollout(
 def validation(
     simulator: learned_simulator.LearnedSimulator,
     example: tuple,
-    n_features: int,
+    feature_components: int,
     cfg: Config,
     device: torch.device,
 ) -> torch.Tensor:
     position = example[0][0].to(device)
     particle_type = example[0][1].to(device)
-    if n_features == 3:
+    if feature_components == 4:
         material_property = example[0][2].to(device)
         n_particles_per_example = example[0][3].to(device)
-    elif n_features == 2:
+    elif feature_components == 3:
         material_property = None
         n_particles_per_example = example[0][2].to(device)
     else:
@@ -808,7 +808,12 @@ def train(cfg: Config, device: torch.device):
         fraction=cfg.train_dataset_fraction,
         max_trajectories=cfg.train_dataset_count,
     )
-    n_features = len(dl.dataset[0])
+    sample = dl.dataset[0]
+    features_sample = sample[0] if isinstance(sample, (tuple, list)) else sample
+    if not isinstance(features_sample, (tuple, list)):
+        msg = "Unexpected dataset sample structure; expected (features, label)."
+        raise TypeError(msg)
+    n_feature_components = len(features_sample)
 
     # ETA 用タイミング管理（軽量）
     train_start_time = time.perf_counter()
@@ -817,6 +822,7 @@ def train(cfg: Config, device: torch.device):
 
     validation_interval = cfg.validation_interval
     dl_valid = None
+    dl_valid_iter = None
     if validation_interval is not None:
         dl_valid = data_loader.get_data_loader_by_samples(
             path=Path(cfg.data_path) / "valid.npz",
@@ -826,9 +832,20 @@ def train(cfg: Config, device: torch.device):
             max_trajectories=cfg.valid_dataset_count,
             shuffle=False,
         )
-        if len(dl_valid.dataset[0]) != n_features:
+        if len(dl_valid.dataset[0][0]) != n_feature_components:
             msg = "`valid.npz` と `train.npz` の特徴数が一致していません。"
             raise ValueError(msg)
+        dl_valid_iter = iter(dl_valid)
+
+    def _next_valid_example():
+        nonlocal dl_valid_iter
+        if dl_valid is None or dl_valid_iter is None:
+            return None
+        try:
+            return next(dl_valid_iter)
+        except StopIteration:
+            dl_valid_iter = iter(dl_valid)
+            return next(dl_valid_iter)
 
     rollout_evaluator: RolloutEvaluator | None = None
     rollout_interval = (
@@ -861,17 +878,18 @@ def train(cfg: Config, device: torch.device):
                 step_tic = time.perf_counter()
                 steps_per_epoch += 1
                 # ((position, particle_type, [material_property], n_particles_per_example), labels)
-                position = example[0][0].to(device)
-                particle_type = example[0][1].to(device)
-                if n_features == 3:
-                    material_property = example[0][2].to(device)
-                    n_particles_per_example = example[0][3].to(device)
-                elif n_features == 2:
+                features, labels = example
+                position = features[0].to(device)
+                particle_type = features[1].to(device)
+                if len(features) == 4:
+                    material_property = features[2].to(device)
+                    n_particles_per_example = features[3].to(device)
+                elif len(features) == 3:
                     material_property = None
-                    n_particles_per_example = example[0][2].to(device)
+                    n_particles_per_example = features[2].to(device)
                 else:
                     raise NotImplementedError
-                labels = example[1].to(device)
+                labels = labels.to(device)
 
                 # ランダムウォーク雑音(非運動学粒子のみ)
                 sampled_noise = noise_utils.get_random_walk_noise_for_position_sequence(
@@ -897,16 +915,20 @@ def train(cfg: Config, device: torch.device):
                     and step > 0
                     and step % validation_interval == 0
                 ):
-                    sampled_valid_example = next(iter(dl_valid))
-                    valid_loss = validation(
-                        simulator, sampled_valid_example, n_features, cfg, device
-                    )
-                    latest_valid_loss_value = float(valid_loss.item())
-                    print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
-                    if tb_writer is not None:
-                        tb_writer.add_scalar(
+                    sampled_valid_example = _next_valid_example()
+                    if sampled_valid_example is not None:
+                        valid_loss = validation(
+                            simulator, sampled_valid_example, n_feature_components, cfg, device
+                        )
+                        latest_valid_loss_value = float(valid_loss.item())
+                        print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
+                        if tb_writer is not None:
+                            tb_writer.add_scalar(
                             "valid/loss", latest_valid_loss_value, step
                         )
+                    else:
+                        print("Warning: validation loader is empty; skipping validation step.")
+                        valid_loss = None
 
                 if (
                     rollout_evaluator is not None
@@ -1058,20 +1080,26 @@ def train(cfg: Config, device: torch.device):
             train_loss_hist.append((epoch, float(epoch_avg)))
 
             if dl_valid is not None and validation_interval is not None:
-                sampled_valid_example = next(iter(dl_valid))
-                epoch_valid_loss = validation(
-                    simulator, sampled_valid_example, n_features, cfg, device
-                )
-                epoch_valid_loss_float = float(epoch_valid_loss.item())
-                valid_loss_hist.append((epoch, epoch_valid_loss_float))
-                latest_valid_loss_value = epoch_valid_loss_float
-                print(
-                    f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
-                )
-                if tb_writer is not None:
-                    tb_writer.add_scalar(
-                        "epoch/valid_loss", epoch_valid_loss_float, epoch
+                sampled_valid_example = _next_valid_example()
+                if sampled_valid_example is not None:
+                    epoch_valid_loss = validation(
+                        simulator, sampled_valid_example, n_feature_components, cfg, device
                     )
+                    epoch_valid_loss_float = float(epoch_valid_loss.item())
+                    valid_loss_hist.append((epoch, epoch_valid_loss_float))
+                    latest_valid_loss_value = epoch_valid_loss_float
+                    print(
+                        f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
+                    )
+                    if tb_writer is not None:
+                        tb_writer.add_scalar(
+                            "epoch/valid_loss", epoch_valid_loss_float, epoch
+                        )
+                else:
+                    print(
+                        f"[epoch {epoch}] train={epoch_avg:.6f} (validation skipped: dataset empty)"
+                    )
+                    epoch_valid_loss = None
             else:
                 print(f"[epoch {epoch}] train={epoch_avg:.6f}")
             if tb_writer is not None:

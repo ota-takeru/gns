@@ -11,9 +11,13 @@ def get_random_walk_noise_for_position_sequence(
     velocity_sequence = learned_simulator.time_diff(position_sequence)  # 速度列を計算
 
     num_velocities = velocity_sequence.shape[1]
-    velocity_sequence_noise = torch.randn(list(velocity_sequence.shape)) * (
-        noise_std_last_step / num_velocities**0.5
-    )  # 最後のステップでの標準偏差に合わせて調整
+    if num_velocities == 0:
+        return torch.zeros_like(position_sequence)
+
+    noise_scale = noise_std_last_step / float(num_velocities) ** 0.5
+    velocity_sequence_noise = torch.randn_like(
+        velocity_sequence, device=position_sequence.device
+    ) * noise_scale  # 最後のステップでの標準偏差に合わせて調整
     velocity_sequence_noise = torch.cumsum(
         velocity_sequence_noise, dim=1
     )  # 速度ノイズの累積和を取ってランダムウォークノイズを生成
