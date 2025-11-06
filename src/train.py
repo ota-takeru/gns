@@ -5,6 +5,7 @@ import pickle
 import random
 import re
 import time
+import inspect
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -14,7 +15,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
-from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
@@ -39,6 +39,28 @@ except ImportError:  # pragma: no cover - optional dependency
 INPUT_SEQUENCE_LENGTH = 6  # 先頭6ステップを履歴として使う(速度5本が引ける)
 NUM_PARTICLE_TYPES = 9
 KINEMATIC_PARTICLE_ID = 3
+
+
+try:  # Prefer the new torch.amp API when available to avoid deprecation warnings.
+    from torch.amp import autocast, GradScaler  # type: ignore[attr-defined]
+    _AMP_SOURCE = "torch.amp"
+except (ImportError, AttributeError):  # pragma: no cover - depends on torch version
+    from torch.cuda.amp import autocast, GradScaler  # type: ignore[no-redef]
+    _AMP_SOURCE = "torch.cuda.amp"
+
+try:
+    _AMP_AUTOCAST_SUPPORTS_DEVICE_TYPE = (
+        "device_type" in inspect.signature(autocast).parameters
+    )
+except (ValueError, TypeError):
+    _AMP_AUTOCAST_SUPPORTS_DEVICE_TYPE = False
+
+try:
+    _AMP_GRADSCALER_SUPPORTS_DEVICE_TYPE = (
+        "device_type" in inspect.signature(GradScaler).parameters
+    )
+except (ValueError, TypeError):
+    _AMP_GRADSCALER_SUPPORTS_DEVICE_TYPE = False
 
 
 @dataclass
@@ -594,7 +616,7 @@ def rollout(
 
 
 def validation(
-    simulator: learned_simulator.LearnedSimulator | DDP,
+    simulator: learned_simulator.LearnedSimulator,
     example: tuple,
     feature_components: int,
     cfg: Config,
@@ -618,10 +640,8 @@ def validation(
     non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
     sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
-    core_simulator = _unwrap_simulator(simulator)
-
     with torch.no_grad():
-        pred_acc, target_acc = core_simulator.predict_accelerations(
+        pred_acc, target_acc = simulator.predict_accelerations(
             next_positions=labels,
             position_sequence_noise=sampled_noise,
             position_sequence=position,
@@ -879,7 +899,6 @@ def train(cfg: Config, device: torch.device):
         )
     else:
         simulator = simulator_core
-    forward_simulator = _unwrap_simulator(simulator)
 
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
     if resume_state is not None:
@@ -892,7 +911,10 @@ def train(cfg: Config, device: torch.device):
 
     amp_enabled = bool(cfg.amp_enable and device.type == "cuda")
     amp_dtype = _resolve_amp_dtype(cfg.amp_dtype) if amp_enabled else torch.float32
-    scaler = GradScaler(enabled=amp_enabled)
+    if _AMP_GRADSCALER_SUPPORTS_DEVICE_TYPE:
+        scaler = GradScaler(device_type=device.type, enabled=amp_enabled)
+    else:
+        scaler = GradScaler(enabled=amp_enabled)
 
     log_interval = max(1, int(cfg.log_interval))
     tensorboard_interval = (
@@ -1269,12 +1291,16 @@ def train(cfg: Config, device: torch.device):
                 non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
                 sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
-                autocast_ctx = autocast(
-                    enabled=amp_enabled,
-                    dtype=amp_dtype if amp_enabled else None,
-                )
+                autocast_kwargs: dict[str, Any] = {
+                    "enabled": amp_enabled,
+                }
+                if amp_enabled:
+                    autocast_kwargs["dtype"] = amp_dtype
+                if _AMP_AUTOCAST_SUPPORTS_DEVICE_TYPE:
+                    autocast_kwargs["device_type"] = device.type
+                autocast_ctx = autocast(**autocast_kwargs)
                 with autocast_ctx:
-                    pred_acc, target_acc = forward_simulator.predict_accelerations(
+                    pred_acc, target_acc = simulator.predict_accelerations(
                         next_positions=labels,
                         position_sequence_noise=sampled_noise,
                         position_sequence=position,
