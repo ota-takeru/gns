@@ -6,27 +6,27 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from datetime import timedelta
 
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.cuda.amp import GradScaler, autocast
 import yaml
+from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import data_loader
-from scenarios import Scenario, ScenarioRegistry
 
 # --- gns モジュール群(あなたの環境のパスに応じて調整してください) ---
 import learned_simulator
 import noise_utils
 import reading_utils
+from scenarios import Scenario, ScenarioRegistry
 
 try:
     from tensorboard import program as tensorboard_program
@@ -248,7 +248,9 @@ def _resolve_amp_dtype(name: str) -> torch.dtype:
         return torch.float16
     if normalized in {"bfloat16", "bf16"}:
         if not torch.cuda.is_available():
-            raise ValueError("bfloat16 is only supported on CUDA/CPU with appropriate hardware.")
+            raise ValueError(
+                "bfloat16 is only supported on CUDA/CPU with appropriate hardware."
+            )
         return torch.bfloat16
     if normalized in {"float32", "fp32", "single"}:
         return torch.float32
@@ -286,6 +288,13 @@ def _cleanup_distributed() -> None:
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
+
+
+def _unwrap_simulator(
+    simulator: learned_simulator.LearnedSimulator | DDP,
+) -> learned_simulator.LearnedSimulator:
+    """Return the underlying simulator when wrapped with DDP."""
+    return simulator.module if isinstance(simulator, DDP) else simulator
 
 
 def _set_seed(seed: int) -> None:
@@ -521,7 +530,7 @@ def _get_simulator(
 # 予測系(rollout / validation / predict)
 # -----------------------
 def rollout(
-    simulator: learned_simulator.LearnedSimulator,
+    simulator: learned_simulator.LearnedSimulator | DDP,
     position: torch.Tensor,
     particle_types: torch.Tensor,
     material_property: torch.Tensor | None,
@@ -545,8 +554,10 @@ def rollout(
     if show_progress:
         step_iterator = tqdm(step_iterator, total=nsteps)
 
+    core_simulator = _unwrap_simulator(simulator)
+
     for step_idx in step_iterator:
-        next_position = simulator.predict_positions(
+        next_position = core_simulator.predict_positions(
             current_positions,
             nparticles_per_example=n_particles_per_example,
             particle_types=particle_types,
@@ -583,7 +594,7 @@ def rollout(
 
 
 def validation(
-    simulator: learned_simulator.LearnedSimulator,
+    simulator: learned_simulator.LearnedSimulator | DDP,
     example: tuple,
     feature_components: int,
     cfg: Config,
@@ -607,8 +618,10 @@ def validation(
     non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
     sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
+    core_simulator = _unwrap_simulator(simulator)
+
     with torch.no_grad():
-        pred_acc, target_acc = simulator.predict_accelerations(
+        pred_acc, target_acc = core_simulator.predict_accelerations(
             next_positions=labels,
             position_sequence_noise=sampled_noise,
             position_sequence=position,
@@ -747,7 +760,9 @@ def _resolve_model_path(cfg: Config) -> str:
     if model_file is None and cfg.mode in ("valid", "rollout"):
         model_file = "latest"
 
-    base_dir = Path(getattr(cfg, "model_base_path", cfg.model_path)).expanduser().resolve()
+    base_dir = (
+        Path(getattr(cfg, "model_base_path", cfg.model_path)).expanduser().resolve()
+    )
     search_root = base_dir if base_dir.is_dir() else base_dir.parent
 
     if model_file == "latest":
@@ -864,6 +879,7 @@ def train(cfg: Config, device: torch.device):
         )
     else:
         simulator = simulator_core
+    forward_simulator = _unwrap_simulator(simulator)
 
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
     if resume_state is not None:
@@ -919,7 +935,9 @@ def train(cfg: Config, device: torch.device):
     )
     feature_sample = train_dataset[0]
     features_sample = (
-        feature_sample[0] if isinstance(feature_sample, (tuple, list)) else feature_sample
+        feature_sample[0]
+        if isinstance(feature_sample, (tuple, list))
+        else feature_sample
     )
     if not isinstance(features_sample, (tuple, list)):
         msg = "Unexpected dataset sample structure; expected (features, label)."
@@ -973,7 +991,9 @@ def train(cfg: Config, device: torch.device):
             "batch_size": cfg.batch_size,
             "shuffle": False,
             "num_workers": cfg.num_workers,
-            "persistent_workers": cfg.persistent_workers if cfg.num_workers > 0 else False,
+            "persistent_workers": cfg.persistent_workers
+            if cfg.num_workers > 0
+            else False,
             "pin_memory": cfg.pin_memory,
             "drop_last": False,
             "collate_fn": data_loader.collate_fn,
@@ -1103,9 +1123,7 @@ def train(cfg: Config, device: torch.device):
                 latest_valid_loss_value = float(valid_loss_tensor.item())
                 print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
                 if tb_writer is not None:
-                    tb_writer.add_scalar(
-                        "valid/loss", latest_valid_loss_value, step
-                    )
+                    tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
             else:
                 print("Warning: validation loader is empty; skipping validation step.")
 
@@ -1177,7 +1195,11 @@ def train(cfg: Config, device: torch.device):
             log_parts.append(f"eta={eta_str}")
             print(" ".join(log_parts))
 
-        if is_main_process and tb_writer is not None and step % tensorboard_interval == 0:
+        if (
+            is_main_process
+            and tb_writer is not None
+            and step % tensorboard_interval == 0
+        ):
             tb_writer.add_scalar("train/loss", train_loss, step)
             tb_writer.add_scalar("train/lr", current_lr, step)
             if last_grad_norm is not None:
@@ -1252,7 +1274,7 @@ def train(cfg: Config, device: torch.device):
                     dtype=amp_dtype if amp_enabled else None,
                 )
                 with autocast_ctx:
-                    pred_acc, target_acc = simulator.predict_accelerations(
+                    pred_acc, target_acc = forward_simulator.predict_accelerations(
                         next_positions=labels,
                         position_sequence_noise=sampled_noise,
                         position_sequence=position,
@@ -1280,7 +1302,9 @@ def train(cfg: Config, device: torch.device):
             if micro_batch_count > 0 and step < cfg.ntraining_steps:
                 _optimizer_step()
 
-            epoch_avg = (epoch_train_loss / steps_this_epoch) if steps_this_epoch > 0 else 0.0
+            epoch_avg = (
+                (epoch_train_loss / steps_this_epoch) if steps_this_epoch > 0 else 0.0
+            )
             if is_main_process:
                 train_loss_hist.append((epoch, float(epoch_avg)))
                 if dl_valid is not None and validation_interval is not None:
