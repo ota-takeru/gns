@@ -1,15 +1,22 @@
 import json
 import math
+import os
 import pickle
+import random
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from datetime import timedelta
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.cuda.amp import GradScaler, autocast
 import yaml
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -74,6 +81,21 @@ class Config:
     tensorboard_log_dir: str | None = None
     tensorboard_port: int | None = None
     tensorboard_host: str | None = None
+    seed: int = 42
+    enable_ddp: bool = True
+    ddp_backend: str = "nccl"
+    ddp_timeout_sec: int = 1800
+    ddp_find_unused_parameters: bool = False
+    amp_enable: bool = True
+    amp_dtype: str = "float16"
+    gradient_accumulation_steps: int = 1
+    num_workers: int = 4
+    persistent_workers: bool = True
+    pin_memory: bool = True
+    prefetch_factor: int | None = None
+    world_size: int = 1
+    rank: int = 0
+    local_rank: int = 0
 
 
 def load_config(path: str) -> Config:
@@ -117,7 +139,7 @@ def acceleration_loss(
 
 
 def save_model_and_train_state(
-    simulator: learned_simulator.LearnedSimulator,
+    simulator: learned_simulator.LearnedSimulator | DDP,
     cfg: Config,
     step: int,
     epoch: int,
@@ -128,9 +150,10 @@ def save_model_and_train_state(
     valid_loss_hist: list[tuple[int, float]],
 ):
     Path(cfg.model_path).mkdir(parents=True, exist_ok=True)
+    model_to_save = simulator.module if isinstance(simulator, DDP) else simulator
     # モデル保存
     model_fname = Path(cfg.model_path) / f"model-{step}.pt"
-    simulator.save(str(model_fname))
+    model_to_save.save(str(model_fname))
 
     # train_state 保存
     train_state = dict(
@@ -190,6 +213,21 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "tensorboard_log_dir": cfg.tensorboard_log_dir,
         "tensorboard_port": cfg.tensorboard_port,
         "tensorboard_host": cfg.tensorboard_host,
+        "seed": cfg.seed,
+        "enable_ddp": cfg.enable_ddp,
+        "ddp_backend": cfg.ddp_backend,
+        "ddp_timeout_sec": cfg.ddp_timeout_sec,
+        "ddp_find_unused_parameters": cfg.ddp_find_unused_parameters,
+        "amp_enable": cfg.amp_enable,
+        "amp_dtype": cfg.amp_dtype,
+        "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
+        "num_workers": cfg.num_workers,
+        "persistent_workers": cfg.persistent_workers,
+        "pin_memory": cfg.pin_memory,
+        "prefetch_factor": cfg.prefetch_factor,
+        "world_size": cfg.world_size,
+        "rank": cfg.rank,
+        "local_rank": cfg.local_rank,
     }
 
 
@@ -202,6 +240,60 @@ def _format_eta(seconds: float) -> str:
     if h > 0:
         return f"{h:d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+
+def _resolve_amp_dtype(name: str) -> torch.dtype:
+    normalized = name.lower().strip()
+    if normalized in {"float16", "fp16", "half"}:
+        return torch.float16
+    if normalized in {"bfloat16", "bf16"}:
+        if not torch.cuda.is_available():
+            raise ValueError("bfloat16 is only supported on CUDA/CPU with appropriate hardware.")
+        return torch.bfloat16
+    if normalized in {"float32", "fp32", "single"}:
+        return torch.float32
+    msg = f"Unsupported amp_dtype '{name}'."
+    raise ValueError(msg)
+
+
+def _is_distributed_env(cfg: Config) -> bool:
+    if not cfg.enable_ddp or not dist.is_available():
+        return False
+    required_env = {"RANK", "WORLD_SIZE", "LOCAL_RANK"}
+    return required_env.issubset(os.environ.keys())
+
+
+def _init_distributed(cfg: Config) -> tuple[bool, int, int, int]:
+    if not _is_distributed_env(cfg):
+        return False, 0, 1, 0
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if dist.is_initialized():
+        return True, rank, world_size, local_rank
+
+    timeout = timedelta(seconds=cfg.ddp_timeout_sec)
+    dist.init_process_group(
+        backend=cfg.ddp_backend,
+        timeout=timeout,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    return True, rank, world_size, local_rank
+
+
+def _cleanup_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
+
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _launch_tensorboard(
@@ -700,75 +792,40 @@ def _resolve_model_path(cfg: Config) -> str:
 # 学習
 # -----------------------
 def train(cfg: Config, device: torch.device):
-    # メタ情報
+    distributed = cfg.world_size > 1
+    is_main_process = cfg.rank == 0
+
+    accum_steps = max(1, int(cfg.gradient_accumulation_steps))
+    if accum_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be >= 1")
+
+    _set_seed(cfg.seed + cfg.rank)
+
     metadata_key = (
         cfg.active_scenario.metadata_split if cfg.active_scenario else "train"
     )
     metadata = reading_utils.read_metadata(cfg.data_path, metadata_key)
-    train_loss = 0.0  # 初期化
 
-    # モデルと最適化器
-    simulator = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
-    simulator.to(device)
-    optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
-    current_lr = cfg.lr_init
+    simulator_core = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
+    simulator_core.to(device)
 
-    log_interval = max(1, int(cfg.log_interval))
-    if cfg.tensorboard_interval is not None:
-        tensorboard_interval = max(1, int(cfg.tensorboard_interval))
-    else:
-        tensorboard_interval = log_interval
-
-    tb_writer: SummaryWriter | None = None
-    tb_server: Any | None = None
-    tb_url: str | None = None
-    tb_log_base = (
-        Path(cfg.tensorboard_log_dir)
-        if cfg.tensorboard_log_dir is not None
-        else Path(cfg.model_path) / "tb"
-    )
-    try:
-        tb_writer = SummaryWriter(log_dir=str(tb_log_base))
-        tb_log_path = Path(tb_writer.log_dir).resolve()
-        print(f"TensorBoard logging to {tb_log_path}")
-        tb_server, tb_url = _launch_tensorboard(
-            tb_log_path, cfg.tensorboard_host, cfg.tensorboard_port
-        )
-        if tb_url:
-            print(f"TensorBoard available at {tb_url}")
-        else:
-            cmd_hint = f"tensorboard --logdir {tb_log_path}"
-            print(f"Launch TensorBoard manually if needed:\n  {cmd_hint}")
-    except Exception as exc:  # pragma: no cover - optional dependency/path issues
-        print(f"Warning: could not initialize TensorBoard writer: {exc}")
-        tb_writer = None
-        tb_server = None
-
-    # 進捗状態
+    resume_state: dict[str, Any] | None = None
     step = 0
     epoch = 0
-    steps_per_epoch = 0
-
-    valid_loss = None
-    epoch_train_loss = 0.0
-    epoch_valid_loss = None
+    train_loss_hist: list[tuple[int, float]] = []
+    valid_loss_hist: list[tuple[int, float]] = []
     latest_valid_loss_value: float | None = None
     latest_rollout_metrics: dict[str, float | None] | None = None
-    last_grad_norm: float | None = None
-    last_logged_step = -1
+    valid_loss: torch.Tensor | None = None
+    train_loss = 0.0
 
-    train_loss_hist = []
-    valid_loss_hist = []
-
-    # 再開処理
     if cfg.model_file is not None:
         model_path = _resolve_model_path(cfg)
         train_state_path = None
         if cfg.train_state_file == "latest":
-            # モデルに合わせて同stepの train_state を探す
-            m = re.match(r".*model-(\d+)\.pt", model_path)
-            if m:
-                step_num = int(m.groups()[0])
+            match = re.match(r".*model-(\d+)\.pt", model_path)
+            if match:
+                step_num = int(match.groups()[0])
                 candidate = Path(cfg.model_path) / f"train_state-{step_num}.pt"
                 if candidate.exists():
                     train_state_path = candidate
@@ -782,40 +839,119 @@ def train(cfg: Config, device: torch.device):
             and train_state_path
             and Path(train_state_path).exists()
         ):
-            print(f"Resume from: {model_path}, {train_state_path}")
-            simulator.load(model_path)
-
-            # Optimizer を作り直して state を読む（学習率などは後で上書き）
-            optimizer = torch.optim.Adam(simulator.parameters())
-            train_state = torch.load(train_state_path, map_location=device)
-            optimizer.load_state_dict(train_state["optimizer_state"])
-            optimizer_to(optimizer, device)
-
-            step = int(train_state["global_train_state"]["step"])
-            epoch = int(train_state["global_train_state"]["epoch"])
-            train_loss_hist = list(train_state["loss_history"]["train"])
-            valid_loss_hist = list(train_state["loss_history"]["valid"])
+            if is_main_process:
+                print(f"Resume from: {model_path}, {train_state_path}")
+            simulator_core.load(model_path)
+            resume_state = torch.load(train_state_path, map_location=device)
+            step = int(resume_state["global_train_state"]["step"])
+            epoch = int(resume_state["global_train_state"]["epoch"])
+            train_loss_hist = list(resume_state["loss_history"]["train"])
+            valid_loss_hist = list(resume_state["loss_history"]["valid"])
         else:
-            print("Resume files not fully found; starting fresh.")
+            if is_main_process:
+                print("Resume files not fully found; starting fresh.")
 
-    simulator.train()
+    if distributed:
+        ddp_kwargs: dict[str, Any] = {
+            "broadcast_buffers": False,
+            "find_unused_parameters": cfg.ddp_find_unused_parameters,
+        }
+        if device.type == "cuda":
+            ddp_kwargs["device_ids"] = [device.index]
+            ddp_kwargs["output_device"] = device.index
+        simulator: learned_simulator.LearnedSimulator | DDP = DDP(
+            simulator_core, **ddp_kwargs
+        )
+    else:
+        simulator = simulator_core
 
-    # データローダ
-    dl = data_loader.get_data_loader_by_samples(
+    optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
+    if resume_state is not None:
+        optimizer.load_state_dict(resume_state["optimizer_state"])
+        optimizer_to(optimizer, device)
+        current_lr = optimizer.param_groups[0].get("lr", cfg.lr_init)
+    else:
+        current_lr = cfg.lr_init
+    optimizer.zero_grad(set_to_none=True)
+
+    amp_enabled = bool(cfg.amp_enable and device.type == "cuda")
+    amp_dtype = _resolve_amp_dtype(cfg.amp_dtype) if amp_enabled else torch.float32
+    scaler = GradScaler(enabled=amp_enabled)
+
+    log_interval = max(1, int(cfg.log_interval))
+    tensorboard_interval = (
+        max(1, int(cfg.tensorboard_interval))
+        if cfg.tensorboard_interval is not None
+        else log_interval
+    )
+
+    tb_writer: SummaryWriter | None = None
+    tb_server: Any | None = None
+    tb_url: str | None = None
+    if is_main_process:
+        tb_log_base = (
+            Path(cfg.tensorboard_log_dir)
+            if cfg.tensorboard_log_dir is not None
+            else Path(cfg.model_path) / "tb"
+        )
+        try:
+            tb_writer = SummaryWriter(log_dir=str(tb_log_base))
+            tb_log_path = Path(tb_writer.log_dir).resolve()
+            print(f"TensorBoard logging to {tb_log_path}")
+            tb_server, tb_url = _launch_tensorboard(
+                tb_log_path, cfg.tensorboard_host, cfg.tensorboard_port
+            )
+            if tb_url:
+                print(f"TensorBoard available at {tb_url}")
+            else:
+                cmd_hint = f"tensorboard --logdir {tb_log_path}"
+                print(f"Launch TensorBoard manually if needed:\n  {cmd_hint}")
+        except Exception as exc:  # pragma: no cover
+            print(f"Warning: could not initialize TensorBoard writer: {exc}")
+            tb_writer = None
+            tb_server = None
+
+    train_dataset = data_loader.SamplesDataset(
         path=Path(cfg.data_path) / "train.npz",
         input_length_sequence=INPUT_SEQUENCE_LENGTH,
-        batch_size=cfg.batch_size,
         fraction=cfg.train_dataset_fraction,
         max_trajectories=cfg.train_dataset_count,
     )
-    sample = dl.dataset[0]
-    features_sample = sample[0] if isinstance(sample, (tuple, list)) else sample
+    feature_sample = train_dataset[0]
+    features_sample = (
+        feature_sample[0] if isinstance(feature_sample, (tuple, list)) else feature_sample
+    )
     if not isinstance(features_sample, (tuple, list)):
         msg = "Unexpected dataset sample structure; expected (features, label)."
         raise TypeError(msg)
-    n_feature_components = len(features_sample)
+    feature_components = len(features_sample)
 
-    # ETA 用タイミング管理（軽量）
+    drop_last = accum_steps > 1
+    train_sampler = (
+        DistributedSampler(
+            train_dataset,
+            num_replicas=cfg.world_size,
+            rank=cfg.rank,
+            shuffle=True,
+            drop_last=drop_last,
+        )
+        if distributed
+        else None
+    )
+    train_loader_kwargs: dict[str, Any] = {
+        "batch_size": cfg.batch_size,
+        "shuffle": train_sampler is None,
+        "sampler": train_sampler,
+        "num_workers": cfg.num_workers,
+        "persistent_workers": cfg.persistent_workers if cfg.num_workers > 0 else False,
+        "pin_memory": cfg.pin_memory,
+        "drop_last": drop_last,
+        "collate_fn": data_loader.collate_fn,
+    }
+    if cfg.prefetch_factor is not None and cfg.num_workers > 0:
+        train_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
+    dl = torch.utils.data.DataLoader(train_dataset, **train_loader_kwargs)
+
     train_start_time = time.perf_counter()
     ema_step_time: float | None = None
     steps_counted_for_eta = 0
@@ -823,18 +959,28 @@ def train(cfg: Config, device: torch.device):
     validation_interval = cfg.validation_interval
     dl_valid = None
     dl_valid_iter = None
-    if validation_interval is not None:
-        dl_valid = data_loader.get_data_loader_by_samples(
+    if is_main_process and validation_interval is not None:
+        valid_dataset = data_loader.SamplesDataset(
             path=Path(cfg.data_path) / "valid.npz",
             input_length_sequence=INPUT_SEQUENCE_LENGTH,
-            batch_size=cfg.batch_size,
             fraction=cfg.valid_dataset_fraction,
             max_trajectories=cfg.valid_dataset_count,
-            shuffle=False,
         )
-        if len(dl_valid.dataset[0][0]) != n_feature_components:
+        if len(valid_dataset[0][0]) != feature_components:
             msg = "`valid.npz` と `train.npz` の特徴数が一致していません。"
             raise ValueError(msg)
+        valid_loader_kwargs: dict[str, Any] = {
+            "batch_size": cfg.batch_size,
+            "shuffle": False,
+            "num_workers": cfg.num_workers,
+            "persistent_workers": cfg.persistent_workers if cfg.num_workers > 0 else False,
+            "pin_memory": cfg.pin_memory,
+            "drop_last": False,
+            "collate_fn": data_loader.collate_fn,
+        }
+        if cfg.prefetch_factor is not None and cfg.num_workers > 0:
+            valid_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
+        dl_valid = torch.utils.data.DataLoader(valid_dataset, **valid_loader_kwargs)
         dl_valid_iter = iter(dl_valid)
 
     def _next_valid_example():
@@ -850,16 +996,16 @@ def train(cfg: Config, device: torch.device):
     rollout_evaluator: RolloutEvaluator | None = None
     rollout_interval = (
         int(cfg.rollout_interval)
-        if cfg.rollout_interval and cfg.rollout_interval > 0
+        if cfg.rollout_interval and cfg.rollout_interval > 0 and is_main_process
         else None
     )
     if rollout_interval is not None:
         rollout_dataset_path = _resolve_rollout_dataset_path(cfg)
         if rollout_dataset_path is None:
-            print(
-                "Warning: rollout metrics enabled but no suitable dataset was found; "
-                "disabling rollout evaluation."
-            )
+            if is_main_process:
+                print(
+                    "Warning: rollout metrics enabled but no suitable dataset was found; disabling rollout evaluation."
+                )
             rollout_interval = None
         else:
             rollout_loader = data_loader.get_data_loader_by_trajectories(
@@ -868,16 +1014,220 @@ def train(cfg: Config, device: torch.device):
             rollout_evaluator = RolloutEvaluator(
                 rollout_loader, device, cfg.rollout_max_examples
             )
-            print(
-                f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}"
+            if is_main_process:
+                print(
+                    f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}"
+                )
+
+    epoch_train_loss = 0.0
+    epoch_valid_loss: torch.Tensor | None = None
+    steps_this_epoch = 0
+    last_grad_norm: float | None = None
+    micro_loss_accum = 0.0
+    micro_batch_count = 0
+    micro_accum_start: float | None = None
+
+    def _optimizer_step() -> None:
+        nonlocal step
+        nonlocal current_lr
+        nonlocal last_grad_norm
+        nonlocal steps_this_epoch
+        nonlocal epoch_train_loss
+        nonlocal micro_loss_accum
+        nonlocal micro_batch_count
+        nonlocal train_loss
+        nonlocal ema_step_time
+        nonlocal steps_counted_for_eta
+        nonlocal micro_accum_start
+        nonlocal valid_loss
+        nonlocal latest_valid_loss_value
+        nonlocal latest_rollout_metrics
+
+        if step >= cfg.ntraining_steps:
+            return
+
+        scaler.unscale_(optimizer)
+        parameters = (
+            simulator.module.parameters()
+            if isinstance(simulator, DDP)
+            else simulator.parameters()
+        )
+        last_grad_norm = _compute_grad_norm(parameters)
+
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+
+        mean_loss = micro_loss_accum / max(1, micro_batch_count)
+        train_loss = float(mean_loss)
+        epoch_train_loss += train_loss
+        micro_loss_accum = 0.0
+        micro_batch_count = 0
+        steps_this_epoch += 1
+
+        lr_new = cfg.lr_init * (cfg.lr_decay ** (step / cfg.lr_decay_steps))
+        for group in optimizer.param_groups:
+            group["lr"] = lr_new
+        current_lr = lr_new
+
+        step += 1
+
+        if micro_accum_start is not None:
+            step_duration = time.perf_counter() - micro_accum_start
+            micro_accum_start = None
+            if ema_step_time is None:
+                ema_step_time = step_duration
+            else:
+                alpha = 0.05
+                ema_step_time = alpha * step_duration + (1 - alpha) * ema_step_time
+            steps_counted_for_eta += 1
+
+        if (
+            is_main_process
+            and validation_interval is not None
+            and validation_interval > 0
+            and step > 0
+            and step % validation_interval == 0
+        ):
+            sampled_valid_example = _next_valid_example()
+            if sampled_valid_example is not None:
+                with torch.no_grad():
+                    valid_loss_tensor = validation(
+                        simulator,
+                        sampled_valid_example,
+                        feature_components,
+                        cfg,
+                        device,
+                    )
+                valid_loss = valid_loss_tensor
+                latest_valid_loss_value = float(valid_loss_tensor.item())
+                print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
+                if tb_writer is not None:
+                    tb_writer.add_scalar(
+                        "valid/loss", latest_valid_loss_value, step
+                    )
+            else:
+                print("Warning: validation loader is empty; skipping validation step.")
+
+        if (
+            rollout_evaluator is not None
+            and rollout_interval is not None
+            and step > 0
+            and step % rollout_interval == 0
+        ):
+            simulator.eval()
+            with torch.no_grad():
+                rollout_metrics = rollout_evaluator.evaluate(simulator)
+            simulator.train()
+            latest_rollout_metrics = rollout_metrics
+            if (
+                rollout_metrics["rollout_rmse_mean"] is not None
+                and rollout_metrics["rollout_rmse_last"] is not None
+            ):
+                print(
+                    "[rollout @ step "
+                    f"{step}] mean={rollout_metrics['rollout_rmse_mean']:.6f} "
+                    f"last={rollout_metrics['rollout_rmse_last']:.6f} "
+                    f"instability={rollout_metrics['rollout_instability']:.3f}"
+                )
+                if tb_writer is not None:
+                    tb_writer.add_scalar(
+                        "rollout/rmse_mean",
+                        float(rollout_metrics["rollout_rmse_mean"]),
+                        step,
+                    )
+                    tb_writer.add_scalar(
+                        "rollout/rmse_last",
+                        float(rollout_metrics["rollout_rmse_last"]),
+                        step,
+                    )
+                    tb_writer.add_scalar(
+                        "rollout/instability",
+                        float(rollout_metrics["rollout_instability"]),
+                        step,
+                    )
+
+        if is_main_process and step % log_interval == 0:
+            remaining_steps = max(0, cfg.ntraining_steps - step)
+            if ema_step_time is not None and steps_counted_for_eta > 0:
+                eta_sec = remaining_steps * ema_step_time
+            else:
+                elapsed = time.perf_counter() - train_start_time
+                avg = elapsed / max(1, steps_counted_for_eta)
+                eta_sec = remaining_steps * avg
+            eta_str = _format_eta(eta_sec)
+            log_parts = [
+                f"epoch={epoch}",
+                f"step={step}/{cfg.ntraining_steps}",
+                f"loss={train_loss:.6f}",
+                f"lr={current_lr:.6e}",
+            ]
+            if last_grad_norm is not None:
+                log_parts.append(f"grad_norm={last_grad_norm:.4f}")
+            if latest_valid_loss_value is not None:
+                log_parts.append(f"valid={latest_valid_loss_value:.6f}")
+            if latest_rollout_metrics is not None:
+                rmse_mean = latest_rollout_metrics.get("rollout_rmse_mean")
+                rmse_last = latest_rollout_metrics.get("rollout_rmse_last")
+                instability = latest_rollout_metrics.get("rollout_instability")
+                if rmse_mean is not None and rmse_last is not None:
+                    log_parts.append(f"rollout_mean={rmse_mean:.6f}")
+                    log_parts.append(f"rollout_last={rmse_last:.6f}")
+                    log_parts.append(f"rollout_instab={instability:.3f}")
+            log_parts.append(f"eta={eta_str}")
+            print(" ".join(log_parts))
+
+        if is_main_process and tb_writer is not None and step % tensorboard_interval == 0:
+            tb_writer.add_scalar("train/loss", train_loss, step)
+            tb_writer.add_scalar("train/lr", current_lr, step)
+            if last_grad_norm is not None:
+                tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
+            if latest_valid_loss_value is not None:
+                tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+            if (
+                latest_rollout_metrics is not None
+                and latest_rollout_metrics.get("rollout_rmse_mean") is not None
+            ):
+                tb_writer.add_scalar(
+                    "rollout/rmse_mean",
+                    float(latest_rollout_metrics["rollout_rmse_mean"]),
+                    step,
+                )
+                tb_writer.add_scalar(
+                    "rollout/rmse_last",
+                    float(latest_rollout_metrics["rollout_rmse_last"]),
+                    step,
+                )
+                tb_writer.add_scalar(
+                    "rollout/instability",
+                    float(latest_rollout_metrics["rollout_instability"]),
+                    step,
+                )
+            tb_writer.flush()
+
+        if is_main_process and cfg.nsave_steps and step % cfg.nsave_steps == 0:
+            save_model_and_train_state(
+                simulator,
+                cfg,
+                step,
+                epoch,
+                optimizer,
+                train_loss,
+                float(valid_loss.item()) if valid_loss is not None else None,
+                train_loss_hist,
+                valid_loss_hist,
             )
 
     try:
         while step < cfg.ntraining_steps:
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
             for example in dl:
-                step_tic = time.perf_counter()
-                steps_per_epoch += 1
-                # ((position, particle_type, [material_property], n_particles_per_example), labels)
+                if step >= cfg.ntraining_steps:
+                    break
+                if micro_batch_count == 0:
+                    micro_accum_start = time.perf_counter()
+
                 features, labels = example
                 position = features[0].to(device)
                 particle_type = features[1].to(device)
@@ -891,281 +1241,117 @@ def train(cfg: Config, device: torch.device):
                     raise NotImplementedError
                 labels = labels.to(device)
 
-                # ランダムウォーク雑音(非運動学粒子のみ)
                 sampled_noise = noise_utils.get_random_walk_noise_for_position_sequence(
                     position, noise_std_last_step=cfg.noise_std
                 ).to(device)
                 non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
                 sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
-                # 予測 & 教師(加速度)
-                pred_acc, target_acc = simulator.predict_accelerations(
-                    next_positions=labels,
-                    position_sequence_noise=sampled_noise,
-                    position_sequence=position,
-                    nparticles_per_example=n_particles_per_example,
-                    particle_types=particle_type,
-                    material_property=material_property,
+                autocast_ctx = autocast(
+                    enabled=amp_enabled,
+                    dtype=amp_dtype if amp_enabled else None,
                 )
+                with autocast_ctx:
+                    pred_acc, target_acc = simulator.predict_accelerations(
+                        next_positions=labels,
+                        position_sequence_noise=sampled_noise,
+                        position_sequence=position,
+                        nparticles_per_example=n_particles_per_example,
+                        particle_types=particle_type,
+                        material_property=material_property,
+                    )
+                    loss_tensor = acceleration_loss(
+                        pred_acc, target_acc, non_kinematic_mask
+                    )
 
-                # (オプション)軽量バリデーション
-                if (
-                    dl_valid is not None
-                    and validation_interval is not None
-                    and step > 0
-                    and step % validation_interval == 0
-                ):
+                train_loss_micro = float(loss_tensor.item())
+                micro_loss_accum += train_loss_micro
+                micro_batch_count += 1
+
+                scaled_loss = loss_tensor / accum_steps
+                scaler.scale(scaled_loss).backward()
+
+                if micro_batch_count >= accum_steps:
+                    _optimizer_step()
+
+            if step >= cfg.ntraining_steps:
+                break
+
+            if micro_batch_count > 0 and step < cfg.ntraining_steps:
+                _optimizer_step()
+
+            epoch_avg = (epoch_train_loss / steps_this_epoch) if steps_this_epoch > 0 else 0.0
+            if is_main_process:
+                train_loss_hist.append((epoch, float(epoch_avg)))
+                if dl_valid is not None and validation_interval is not None:
                     sampled_valid_example = _next_valid_example()
                     if sampled_valid_example is not None:
-                        valid_loss = validation(
-                            simulator, sampled_valid_example, n_feature_components, cfg, device
-                        )
-                        latest_valid_loss_value = float(valid_loss.item())
-                        print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
-                        if tb_writer is not None:
-                            tb_writer.add_scalar(
-                            "valid/loss", latest_valid_loss_value, step
-                        )
-                    else:
-                        print("Warning: validation loader is empty; skipping validation step.")
-                        valid_loss = None
-
-                if (
-                    rollout_evaluator is not None
-                    and rollout_interval is not None
-                    and step > 0
-                    and step % rollout_interval == 0
-                ):
-                    simulator.eval()
-                    with torch.no_grad():
-                        rollout_metrics = rollout_evaluator.evaluate(simulator)
-                    simulator.train()
-                    latest_rollout_metrics = rollout_metrics
-                    if (
-                        rollout_metrics["rollout_rmse_mean"] is not None
-                        and rollout_metrics["rollout_rmse_last"] is not None
-                    ):
+                        with torch.no_grad():
+                            epoch_valid_loss = validation(
+                                simulator,
+                                sampled_valid_example,
+                                feature_components,
+                                cfg,
+                                device,
+                            )
+                        epoch_valid_loss_float = float(epoch_valid_loss.item())
+                        valid_loss_hist.append((epoch, epoch_valid_loss_float))
+                        latest_valid_loss_value = epoch_valid_loss_float
                         print(
-                            "[rollout @ step "
-                            f"{step}] mean={rollout_metrics['rollout_rmse_mean']:.6f} "
-                            f"last={rollout_metrics['rollout_rmse_last']:.6f} "
-                            f"instability={rollout_metrics['rollout_instability']:.3f}"
+                            f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
                         )
                         if tb_writer is not None:
                             tb_writer.add_scalar(
-                                "rollout/rmse_mean",
-                                float(rollout_metrics["rollout_rmse_mean"]),
-                                step,
+                                "epoch/valid_loss", epoch_valid_loss_float, epoch
                             )
-                            tb_writer.add_scalar(
-                                "rollout/rmse_last",
-                                float(rollout_metrics["rollout_rmse_last"]),
-                                step,
-                            )
-                            tb_writer.add_scalar(
-                                "rollout/instability",
-                                float(rollout_metrics["rollout_instability"]),
-                                step,
-                            )
-
-                # ロス → 逆伝播 → 更新
-                loss = acceleration_loss(pred_acc, target_acc, non_kinematic_mask)
-                train_loss = float(loss.item())
-                epoch_train_loss += train_loss
-
-                optimizer.zero_grad()
-                loss.backward()
-                grad_norm = _compute_grad_norm(simulator.parameters())
-                last_grad_norm = grad_norm
-                optimizer.step()
-
-                # 学習率を指数減衰で更新
-                lr_new = cfg.lr_init * (cfg.lr_decay ** (step / cfg.lr_decay_steps))
-                for g in optimizer.param_groups:
-                    g["lr"] = lr_new
-                current_lr = lr_new
-
-                # 1 ステップ時間を EMA で更新（軽量）
-                step_duration = time.perf_counter() - step_tic
-                if ema_step_time is None:
-                    ema_step_time = step_duration
-                else:
-                    alpha = 0.05  # 平滑化係数（小さいほど滑らか・低コスト）
-                    ema_step_time = alpha * step_duration + (1 - alpha) * ema_step_time
-                steps_counted_for_eta += 1
-
-                if step % log_interval == 0:
-                    remaining_steps = max(0, cfg.ntraining_steps - max(0, step))
-                    if ema_step_time is not None and steps_counted_for_eta > 0:
-                        eta_sec = remaining_steps * ema_step_time
                     else:
-                        elapsed = time.perf_counter() - train_start_time
-                        avg = elapsed / max(1, steps_counted_for_eta)
-                        eta_sec = remaining_steps * avg
-                    eta_str = _format_eta(eta_sec)
-                    log_parts = [
-                        f"epoch={epoch}",
-                        f"step={step}/{cfg.ntraining_steps}",
-                        f"loss={train_loss:.6f}",
-                        f"lr={lr_new:.6e}",
-                    ]
-                    if last_grad_norm is not None:
-                        log_parts.append(f"grad_norm={last_grad_norm:.4f}")
-                    if latest_valid_loss_value is not None:
-                        log_parts.append(f"valid={latest_valid_loss_value:.6f}")
-                    if latest_rollout_metrics is not None:
-                        rmse_mean = latest_rollout_metrics.get("rollout_rmse_mean")
-                        rmse_last = latest_rollout_metrics.get("rollout_rmse_last")
-                        instability = latest_rollout_metrics.get("rollout_instability")
-                        if rmse_mean is not None and rmse_last is not None:
-                            log_parts.append(f"rollout_mean={rmse_mean:.6f}")
-                            log_parts.append(f"rollout_last={rmse_last:.6f}")
-                            log_parts.append(f"rollout_instab={instability:.3f}")
-                    log_parts.append(f"eta={eta_str}")
-                    print(" ".join(log_parts))
-
-                if tb_writer is not None and step % tensorboard_interval == 0:
-                    tb_writer.add_scalar("train/loss", train_loss, step)
-                    tb_writer.add_scalar("train/lr", lr_new, step)
-                    if last_grad_norm is not None:
-                        tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
-                    if latest_valid_loss_value is not None:
-                        tb_writer.add_scalar(
-                            "valid/loss", latest_valid_loss_value, step
-                        )
-                    if (
-                        latest_rollout_metrics is not None
-                        and latest_rollout_metrics.get("rollout_rmse_mean") is not None
-                    ):
-                        tb_writer.add_scalar(
-                            "rollout/rmse_mean",
-                            float(latest_rollout_metrics["rollout_rmse_mean"]),
-                            step,
-                        )
-                        tb_writer.add_scalar(
-                            "rollout/rmse_last",
-                            float(latest_rollout_metrics["rollout_rmse_last"]),
-                            step,
-                        )
-                        tb_writer.add_scalar(
-                            "rollout/instability",
-                            float(latest_rollout_metrics["rollout_instability"]),
-                            step,
-                        )
-                    tb_writer.flush()
-                    last_logged_step = step
-
-                # 保存
-                if cfg.nsave_steps and step % cfg.nsave_steps == 0:
-                    save_model_and_train_state(
-                        simulator,
-                        cfg,
-                        step,
-                        epoch,
-                        optimizer,
-                        train_loss,
-                        float(valid_loss.item()) if valid_loss is not None else None,
-                        train_loss_hist,
-                        valid_loss_hist,
-                    )
-
-                step += 1
-                if step >= cfg.ntraining_steps:
-                    break
-
-            # --- エポック終端処理 ---
-            epoch_avg = (
-                epoch_train_loss / steps_per_epoch if steps_per_epoch > 0 else 0.0
-            )
-            train_loss_hist.append((epoch, float(epoch_avg)))
-
-            if dl_valid is not None and validation_interval is not None:
-                sampled_valid_example = _next_valid_example()
-                if sampled_valid_example is not None:
-                    epoch_valid_loss = validation(
-                        simulator, sampled_valid_example, n_feature_components, cfg, device
-                    )
-                    epoch_valid_loss_float = float(epoch_valid_loss.item())
-                    valid_loss_hist.append((epoch, epoch_valid_loss_float))
-                    latest_valid_loss_value = epoch_valid_loss_float
-                    print(
-                        f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
-                    )
-                    if tb_writer is not None:
-                        tb_writer.add_scalar(
-                            "epoch/valid_loss", epoch_valid_loss_float, epoch
+                        print(
+                            f"[epoch {epoch}] train={epoch_avg:.6f} (validation skipped: dataset empty)"
                         )
                 else:
-                    print(
-                        f"[epoch {epoch}] train={epoch_avg:.6f} (validation skipped: dataset empty)"
-                    )
-                    epoch_valid_loss = None
-            else:
-                print(f"[epoch {epoch}] train={epoch_avg:.6f}")
-            if tb_writer is not None:
-                tb_writer.add_scalar("epoch/train_loss", epoch_avg, epoch)
-                tb_writer.flush()
+                    print(f"[epoch {epoch}] train={epoch_avg:.6f}")
+                if tb_writer is not None:
+                    tb_writer.add_scalar("epoch/train_loss", epoch_avg, epoch)
+                    tb_writer.flush()
 
-            # リセット
             epoch_train_loss = 0.0
-            steps_per_epoch = 0
+            steps_this_epoch = 0
             epoch += 1
 
             if step >= cfg.ntraining_steps:
                 break
 
     except KeyboardInterrupt:
-        print("Interrupted. Saving last state...")
+        if is_main_process:
+            print("Interrupted. Saving last state...")
     finally:
-        save_model_and_train_state(
-            simulator,
-            cfg,
-            step,
-            epoch,
-            optimizer,
-            train_loss,
-            float(valid_loss.item()) if valid_loss is not None else None,
-            train_loss_hist,
-            valid_loss_hist,
-        )
-        if tb_writer is not None:
-            if last_logged_step != step:
-                tb_writer.add_scalar("train/loss", train_loss, step)
-                tb_writer.add_scalar("train/lr", current_lr, step)
-                if last_grad_norm is not None:
-                    tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
-                if latest_valid_loss_value is not None:
-                    tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
-                if (
-                    latest_rollout_metrics is not None
-                    and latest_rollout_metrics.get("rollout_rmse_mean") is not None
-                ):
-                    tb_writer.add_scalar(
-                        "rollout/rmse_mean",
-                        float(latest_rollout_metrics["rollout_rmse_mean"]),
-                        step,
-                    )
-                    tb_writer.add_scalar(
-                        "rollout/rmse_last",
-                        float(latest_rollout_metrics["rollout_rmse_last"]),
-                        step,
-                    )
-                    tb_writer.add_scalar(
-                        "rollout/instability",
-                        float(latest_rollout_metrics["rollout_instability"]),
-                        step,
-                    )
-                tb_writer.flush()
-            tb_writer.close()
-        if (
-            tb_server is not None
-            and hasattr(tb_server, "_server")
-            and tb_server._server is not None
-        ):
-            try:  # pragma: no cover - server cleanup
-                tb_server._server.stop()
-            except Exception:
-                pass
+        if distributed:
+            dist.barrier()
+        if is_main_process:
+            save_model_and_train_state(
+                simulator,
+                cfg,
+                step,
+                epoch,
+                optimizer,
+                train_loss,
+                float(valid_loss.item()) if valid_loss is not None else None,
+                train_loss_hist,
+                valid_loss_hist,
+            )
+            if tb_writer is not None:
+                tb_writer.close()
+            if (
+                tb_server is not None
+                and hasattr(tb_server, "_server")
+                and tb_server._server is not None
+            ):
+                try:  # pragma: no cover
+                    tb_server._server.stop()
+                except Exception:
+                    pass
+        if distributed:
+            _cleanup_distributed()
 
 
 # -----------------------
@@ -1174,11 +1360,16 @@ def train(cfg: Config, device: torch.device):
 def main():
     import argparse
 
-    p = argparse.ArgumentParser(description="GNS Runner (no DDP)")
+    p = argparse.ArgumentParser(description="GNS Runner")
     p.add_argument("--config", "-c", default="config.yaml", help="Path to YAML config")
     args = p.parse_args()
 
     cfg = load_config(args.config)
+    distributed, rank, world_size, local_rank = _init_distributed(cfg)
+    cfg.world_size = world_size
+    cfg.rank = rank
+    cfg.local_rank = local_rank
+
     try:
         resolved_cfg_path = Path(args.config).expanduser()
         if not resolved_cfg_path.is_absolute():
@@ -1187,13 +1378,14 @@ def main():
             resolved_cfg_path = resolved_cfg_path.resolve()
     except Exception:
         resolved_cfg_path = Path(args.config)
-    print(f"config: {resolved_cfg_path}")
-    print(f"  mode={cfg.mode} data_path={cfg.data_path} scenario={cfg.scenario}")
-    if cfg.scenario_options:
-        option_keys = ", ".join(sorted(cfg.scenario_options))
-        print(f"  scenario_options: {option_keys}")
-    else:
-        print("  scenario_options: (none)")
+    if cfg.rank == 0:
+        print(f"config: {resolved_cfg_path}")
+        print(f"  mode={cfg.mode} data_path={cfg.data_path} scenario={cfg.scenario}")
+        if cfg.scenario_options:
+            option_keys = ", ".join(sorted(cfg.scenario_options))
+            print(f"  scenario_options: {option_keys}")
+        else:
+            print("  scenario_options: (none)")
 
     base_dataset = Path(cfg.data_path).expanduser().resolve()
     default_aliases = [cfg.scenario]
@@ -1208,22 +1400,28 @@ def main():
     if cfg.rollout_dataset is None and scenario.rollout_dataset:
         cfg.rollout_dataset = scenario.rollout_dataset
     cfg.active_scenario = scenario
-    print(f"scenario: {scenario.key} @ {scenario.dataset_dir}")
-    if scenario.description:
-        print(f"  description: {scenario.description}")
+    if cfg.rank == 0:
+        print(f"scenario: {scenario.key} @ {scenario.dataset_dir}")
+        if scenario.description:
+            print(f"  description: {scenario.description}")
 
     _prepare_model_directory(cfg)
     run_dir = getattr(cfg, "model_run_path", None)
-    if run_dir:
+    if run_dir and cfg.rank == 0:
         print(f"model run directory: {run_dir}")
 
-    # デバイス選択
-    if torch.cuda.is_available() and cfg.cuda_device_number is not None:
-        device = torch.device(f"cuda:{int(cfg.cuda_device_number)}")
+    if torch.cuda.is_available():
+        if distributed:
+            device = torch.device(f"cuda:{local_rank}")
+        elif cfg.cuda_device_number is not None:
+            device = torch.device(f"cuda:{int(cfg.cuda_device_number)}")
+        else:
+            device = torch.device("cuda")
     else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cpu")
 
-    print(f"device: {device}")
+    if cfg.rank == 0:
+        print(f"device: {device}")
 
     # 設定を保存(再現性のため)
     Path(cfg.model_path).mkdir(parents=True, exist_ok=True)
@@ -1239,6 +1437,9 @@ def main():
     else:
         msg = f"Unknown mode: {cfg.mode}"
         raise ValueError(msg)
+
+    if distributed and cfg.mode != "train":
+        _cleanup_distributed()
 
 
 if __name__ == "__main__":

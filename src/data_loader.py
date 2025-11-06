@@ -240,6 +240,12 @@ def get_data_loader_by_samples(
     *,
     fraction: float | None = None,
     max_trajectories: int | None = None,
+    sampler=None,
+    num_workers: int = 0,
+    persistent_workers: bool = False,
+    pin_memory: bool = True,
+    drop_last: bool = False,
+    prefetch_factor: int | None = None,
 ):
     dataset = SamplesDataset(
         path,
@@ -247,17 +253,29 @@ def get_data_loader_by_samples(
         fraction=fraction,
         max_trajectories=max_trajectories,
     )
-    return torch.utils.data.DataLoader(
-        dataset,
+    effective_shuffle = shuffle and sampler is None
+    effective_persistent = persistent_workers if num_workers > 0 else False
+    dataloader_kwargs = dict(
         batch_size=batch_size,
-        shuffle=shuffle,
-        pin_memory=True,
+        shuffle=effective_shuffle,
+        sampler=sampler,
+        num_workers=num_workers,
+        persistent_workers=effective_persistent,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
         collate_fn=collate_fn,
     )
+    if prefetch_factor is not None and num_workers > 0:
+        dataloader_kwargs["prefetch_factor"] = prefetch_factor
+    return torch.utils.data.DataLoader(dataset, **dataloader_kwargs)
 
 
 def get_data_loader_by_trajectories(path):
     dataset = TrajectoriesDataset(path)
     return torch.utils.data.DataLoader(
-        dataset, batch_size=None, shuffle=False, pin_memory=True
+        dataset,
+        batch_size=None,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
     )
