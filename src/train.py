@@ -750,22 +750,50 @@ def predict(cfg: Config, device: torch.device):
 
 
 def _prepare_model_directory(cfg: Config) -> None:
-    """Ensure model outputs are written to an isolated run directory."""
+    """Ensure model outputs are written to an isolated run directory.
+
+    In distributed training we want every rank to share the same directory.
+    Rank 0 creates the directory and broadcasts the resolved path.
+    """
+
     base_dir = Path(cfg.model_path).expanduser().resolve()
     base_dir.mkdir(parents=True, exist_ok=True)
 
     # Stash base directory for later lookup (e.g., inference latest resolution).
     setattr(cfg, "model_base_path", str(base_dir))
 
-    if cfg.mode == "train" and cfg.model_file is None:
-        timestamp = time.strftime("run-%Y%m%d-%H%M%S")
-        run_dir = base_dir / timestamp
-        counter = 1
-        while run_dir.exists():
-            run_dir = base_dir / f"{timestamp}-{counter:02d}"
-            counter += 1
-        run_dir.mkdir(parents=True, exist_ok=False)
-        run_dir = run_dir.resolve()
+    needs_run_dir = cfg.mode == "train" and cfg.model_file is None
+    distributed = (
+        getattr(cfg, "world_size", 1) > 1
+        and dist.is_available()
+        and dist.is_initialized()
+    )
+
+    if needs_run_dir:
+        run_dir: Path | None = None
+        if cfg.rank == 0:
+            timestamp = time.strftime("run-%Y%m%d-%H%M%S")
+            run_dir = base_dir / timestamp
+            counter = 1
+            while run_dir.exists():
+                run_dir = base_dir / f"{timestamp}-{counter:02d}"
+                counter += 1
+            run_dir.mkdir(parents=True, exist_ok=False)
+            run_dir = run_dir.resolve()
+
+        if distributed:
+            # Share the resolved path with all ranks.
+            payload = [str(run_dir) if run_dir is not None else ""]
+            dist.broadcast_object_list(payload, src=0)
+            if not payload[0]:
+                msg = "Failed to broadcast model run directory from rank 0."
+                raise RuntimeError(msg)
+            run_dir = Path(payload[0]).resolve()
+            dist.barrier()
+        elif run_dir is None:
+            # Single-process fallback should never hit, but keep base_dir safe.
+            run_dir = base_dir.resolve()
+
         setattr(cfg, "model_run_path", str(run_dir))
         cfg.model_path = str(run_dir)
     else:
