@@ -33,16 +33,22 @@ $$
 A(\mathbf{r}) = \int A(\mathbf{r}')\,\delta(\mathbf{r} - \mathbf{r}')\,d\mathbf{r}'
 $$
 
-と書ける。デルタ関数の代わりにカーネル関数 $W$ を用いて近似すると
+と表せる。デルタ関数の代わりにカーネル関数 $W$ を用いて近似すると、
 
 $$
 A(\mathbf{r})
-\approx \int A(\mathbf{r}') W(\mathbf{r} - \mathbf{r}', h)\, d\mathbf{r}' + O(h^2),
+\approx \int A(\mathbf{r}')\,W(\mathbf{r} - \mathbf{r}', h)\,d\mathbf{r}' + O(h^2),
 \qquad
-\int W(\mathbf{r} - \mathbf{r}', h)\, d\mathbf{r}' = 1
+\int W(\mathbf{r} - \mathbf{r}', h)\,d\mathbf{r}' = 1
 $$
 
-となり、$\mathbf{r}$ 周りの重み付き平均として近似できる。
+となる。カーネル関数 $W$ は次の性質を持つ。
+
+- $W(\mathbf{r}) = W(-\mathbf{r})$（対称性）
+- $W(\mathbf{r}) \ge 0$（非負性）
+- $|\mathbf{r}| > kh$ のとき $W(\mathbf{r}) = 0$（有限支持）
+
+このように、$\mathbf{r}$ 周辺の重み付き平均として関数値を近似できる。
 
 連続体の積分を粒子の和に離散化すると
 
@@ -150,7 +156,6 @@ $$
 $$
 
 したがって
-
 $$
 \begin{aligned}
 \frac{D\rho}{Dt} &= -\rho\,(\nabla \cdot \mathbf{v}) \\
@@ -304,9 +309,59 @@ $$
 \end{aligned}
 $$
 
-係数を調整して、
+実際のラプラシアンの定義と一致するように係数を調整する。これは$\mathbf{v}_b$のテイラー展開を右辺に代入して求められる。
 
 $$
 \nu \nabla^2 \mathbf{v}(\mathbf{r}_a)
 \approx 2 \nu \sum_b \frac{m_b}{\rho_b} \frac{(\mathbf{v}_b - \mathbf{v}_a)}{|\mathbf{r}_b - \mathbf{r}_a|^2}(\mathbf{r}_b - \mathbf{r}_a) \cdot \nabla_a W_{ab}
 $$
+
+### 人工粘性
+人工粘性は、数値的に安定したシミュレーションを行うために導入される。
+SPH 法における人工粘性項の離散化は以下の様に表される。これは２点の距離が近づいているときにのみ働く。
+$$
+\frac{d\mathbf{v}_a}{dt}
+= - \sum_b m_b \Pi_{ab} \nabla_a W_{ab}
+$$
+ここで、$\Pi_{ab}$は粘性係数。圧縮の度合いを表す$\mu_{ab}$の一次項と二次項から構成される。
+$$
+\Pi_{ab} =
+\begin{cases}
+\displaystyle
+\frac{-\alpha \bar c_{ab} \mu_{ab} + \beta \mu_{ab}^2}{\bar \rho_{ab}} & \text{if } (\mathbf{v}_{ab}) \cdot (\mathbf{r}_{ab}) < 0(２点の距離が近づいているとき) \\
+0 & \text{otherwise}
+\end{cases}
+$$
+
+- $\alpha, \beta$ : 人工粘性の強さを調整する定数  
+- $\bar c_{ab}$ : 粒子$a$と$b$の音速の平均、単位を合わせるために用いる
+- $\bar \rho_{ab}$ : 粒子$a$と$b$の密度の平均
+
+$\mathbf{v}_{ab} \cdot \mathbf{r}_{ab}$は以下の様に計算でき、２粒子の距離が近づいているときに負の値を取る。
+$$
+\frac{d\mathbf{r}_{ab}^2}{dt} = 2 \mathbf{r}_{ab} \cdot \frac{d\mathbf{r}_{ab}}{dt} = 2 \mathbf{r}_{ab} \cdot \mathbf{v}_{ab} 
+$$
+
+$\mu_{ab}$は以下の様に定義され、粒子がどれくらいの勢いで近づいているかを表す。
+$$
+\mu_{ab} = \frac{h (\mathbf{v}_{ab}) \cdot (\mathbf{r}_{ab})}{|\mathbf{r}_{ab}|^2 + \epsilon h^2} 
+$$
+- $\epsilon h^2$ : 分母がゼロになるのを防ぐための微小量
+
+つぎに、人工粘性項がナビエ・ストークス方程式の粘性項の離散化であることを示す。
+$\alpha$に関する項だけを考えると、
+$$
+\begin{aligned}
+\sum_b m_b \Pi_{ab} \nabla_a W_{ab}
+&\approx \sum_b m_b \frac{\alpha \bar c_{ab} \mu_{ab}}{\bar \rho_{ab}} \nabla_a W_{ab} \\
+&\approx \sum_b m_b \frac{\alpha \bar c_{ab}h   }{\bar \rho_{ab}} \frac{\mathbf{v}_{ab}\cdot \mathbf{r}_{ab}}{|\mathbf{r}_{ab}|^2} \nabla_a W_{ab} \\
+\end{aligned}
+$$
+これは物理粘性の離散化、
+$$
+\nu \nabla^2 \mathbf{v}(\mathbf{r}_a)
+\approx 2 \nu \sum_b \frac{m_b}{\rho_b} \frac{(\mathbf{v}_b - \mathbf{v}_a)}{|\mathbf{r}_b - \mathbf{r}_a|^2}(\mathbf{r}_b - \mathbf{r}_a) \cdot \nabla_a W_{ab}
+$$
+と同じ形をしている。
+よって、人工粘性項はナビエ・ストークス方程式の粘性項の離散化とみなすことができる。
+
