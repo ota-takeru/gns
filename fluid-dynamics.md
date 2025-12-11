@@ -4,26 +4,45 @@
 
 - $\mathbf{v}$ : 流体の速度ベクトル
 - $\rho$ : 流体の密度
-- $p$ : 流体の圧力
-- $\nabla \cdot \mathbf{v}$ : 単位体積当たりの流出量
 
 **連続の式（質量保存）**
 
 $$
-\frac{D\rho}{Dt} = -\rho\,(\nabla \cdot \mathbf{v})
+\frac{D\rho}{Dt} = -\rho\,(\nabla \cdot \mathbf{v}) 
 $$
+- $\nabla \cdot \mathbf{v} = \left(\frac{ \partial v_x}{\partial x} + \frac{\partial v_y}{\partial y} + \frac{\partial v_z}{\partial z}\right)$ : 体積の変化率と考えられる(空間的な速度の変化が大きいほど体積が増える)
+  
+つまり、密度の変化率が、流体の体積変化率(発散)に比例することを表している。
 
 **運動方程式（オイラー方程式）**
 
 $$
-\frac{D \mathbf{v}}{Dt} = -\frac{1}{\rho} \nabla p
+\frac{D \mathbf{v}}{Dt} = -\frac{1}{\rho} \nabla p + \mathbf{g}
 $$
+左右の面に働く圧力の差がその点での圧力になる。
+その差を体積で割ったのが圧力の勾配$\nabla p$に対応する。
+
+圧力は密度の関数で与えられる。
+$$
+p = p(\rho)
+$$
+これは扱う流体によって異なる。例えば、水などの非圧縮性流体を近似する際は以下の式を用いる。
+tait方程式:
+$$
+p = B \left[ \left( \frac{\rho}{\rho_0} \right)^\gamma - 1 \right]
+$$
+- $B$, $\gamma$ : 物質ごとに決める定数
+- $\rho_0$ : 基準密度
+  
+小さい密度変化に対して大きな圧力変化が生じるようにすることで、非圧縮性を近似的に表現している。
+
 
 **内部エネルギーの時間発展方程式**
 
 $$
 \frac{Du}{Dt} = -\frac{p}{\rho} (\nabla \cdot \mathbf{v})
 $$
+圧力(力)×体積変化率(速度)＝仕事率（エネルギー変化率）を表している。
 
 ## 2. カーネル近似と粒子和による離散化
 
@@ -38,9 +57,9 @@ $$
 $$
 A(\mathbf{r})
 \approx \int A(\mathbf{r}')\,W(\mathbf{r} - \mathbf{r}', h)\,d\mathbf{r}' + O(h^2),
-\qquad
+\quad
 \int W(\mathbf{r} - \mathbf{r}', h)\,d\mathbf{r}' = 1
-$$
+$$  
 
 となる。カーネル関数 $W$ は次の性質を持つ。
 
@@ -76,15 +95,10 @@ $$
 \approx \sum_b m_b \frac{\mathbf{A}_b}{\rho_b}\cdot \nabla W(\mathbf{r} - \mathbf{r}_b, h).
 $$
 
-これらの近似を連続体の基礎方程式に適用すると SPH 法の離散式と一致することを次に示す。
+これらの近似を連続体の基礎方程式に適用すると SPHの離散式と一致することを次に示す。
 
 ## 3. 基礎方程式の SPH 離散化
-
-粒子 $a$ の位置を $\mathbf{r}_a$、質量を $m_a$ とし、  
-カーネル $W_{ab} = W(\mathbf{r}_a - \mathbf{r}_b, h_a)$、  
-その勾配を $\nabla_a W_{ab} = \nabla_{\mathbf{r}_a} W(\mathbf{r}_a - \mathbf{r}_b, h_a)$ と書く。
-
-SPH 法の離散式が流体の基礎方程式の離散化であることを示す。
+SPHの離散式が流体の基礎方程式の離散化であることを示す。
 
 ### 3.1 連続の式の SPH 離散化
 
@@ -93,6 +107,7 @@ SPH において粒子$a$における密度は以下の様に定義される。
 $$
 \rho_a = \sum_b m_b W(\mathbf{r}_a - \mathbf{r}_b, h_a)
 $$
+$m_b$は一様に定められる質量
 
 この式を時間で微分する。
 
@@ -270,9 +285,28 @@ $$
 
 これは先ほどのオイラーの方程式に粘性項 $\nu \nabla^2 \mathbf{v}$ が追加されたものである。
 
+$\nu \nabla^2 \mathbf{v} = \nu \frac{\partial^2 \mathbf{v}}{\partial x^2} + \nu \frac{\partial^2 \mathbf{v}}{\partial y^2} + \nu \frac{\partial^2 \mathbf{v}}{\partial z^2}$ 
+
+２枚の板の間に流体がある(クェット流れ)を考える。
+この時、x軸方向に流体が流れるとするとせん断応力はx軸方向に働く力で以下の式で書ける。
+$$
+\tau = \mu \frac{du(y)}{dy}
+$$
+- $\mu$ : 動粘性係数
+- $u(y)$ : 流体の速度
+つまり、速度の空間的な変化率が大きいほどせん断応力が大きくなる。
+
+次に単位体積当たりに働く力を考える。
+これは上面と下面のせん断応力の差を体積で割ったものになる。
+$$
+f_x \approx \frac{\tau(y+\Delta y) - \tau(y)}{\Delta y} = \frac{\partial \tau}{\partial y} = \mu \frac{\partial^2 u(y)}{\partial y^2}
+$$
+これは粘性項の各成分と対応している。
+
+
 ### 物理粘性
 
-SPH 法における粘性項の離散化は以下の様に表される。
+SPHにおける粘性項の離散化は以下の様に表される。
 
 $$
 \frac{d\mathbf{v}_a}{dt}
@@ -318,7 +352,7 @@ $$
 
 ### 人工粘性
 人工粘性は、数値的に安定したシミュレーションを行うために導入される。
-SPH 法における人工粘性項の離散化は以下の様に表される。これは２点の距離が近づいているときにのみ働く。
+SPHにおける人工粘性項の離散化は以下の様に表される。これは２点の距離が近づいているときにのみ働く。
 $$
 \frac{d\mathbf{v}_a}{dt}
 = - \sum_b m_b \Pi_{ab} \nabla_a W_{ab}
@@ -334,12 +368,12 @@ $$
 $$
 
 - $\alpha, \beta$ : 人工粘性の強さを調整する定数  
-- $\bar c_{ab}$ : 粒子$a$と$b$の音速の平均、単位を合わせるために用いる
+- $\bar c_{ab}$ : 粒子$a$と$b$の音速(圧力が伝わるはやさ)        の平均、単位を合わせるために用いる
 - $\bar \rho_{ab}$ : 粒子$a$と$b$の密度の平均
 
 $\mathbf{v}_{ab} \cdot \mathbf{r}_{ab}$は以下の様に計算でき、２粒子の距離が近づいているときに負の値を取る。
 $$
-\frac{d\mathbf{r}_{ab}^2}{dt} = 2 \mathbf{r}_{ab} \cdot \frac{d\mathbf{r}_{ab}}{dt} = 2 \mathbf{r}_{ab} \cdot \mathbf{v}_{ab} 
+\frac{d|\mathbf{r}_{ab}|^2}{dt} = 2 \mathbf{r}_{ab} \cdot \frac{d\mathbf{r}_{ab}}{dt} = 2 \mathbf{r}_{ab} \cdot \mathbf{v}_{ab} 
 $$
 
 $\mu_{ab}$は以下の様に定義され、粒子がどれくらいの勢いで近づいているかを表す。
