@@ -10,6 +10,5 @@ rollouts/
 models/
 out_fluid/      
 
-
 # Virtual environments
 .venv

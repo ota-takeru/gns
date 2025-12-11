@@ -330,15 +330,16 @@ def time_diff(  # 速度列を計算
 # 互換性のためのエイリアス
 LearnedSimulator = GNSSimulator
 
-# 手法レジストリ。新しい手法はここに追加する。
-METHOD_REGISTRY = {
-    "gns": GNSSimulator,
-}
-
 
 def get_simulator_class(method_name: str):
-    try:
-        return METHOD_REGISTRY[method_name]
-    except KeyError as exc:  # pragma: no cover - defensive
-        known = ", ".join(sorted(METHOD_REGISTRY))
-        raise ValueError(f"Unknown method '{method_name}'. known: {known}") from exc
+    """手法名から対応するクラスを取得する。"""
+    if method_name == "gns":
+        return GNSSimulator
+    if method_name == "hamiltonian_sph":
+        # 循環 import を避けるため遅延 import
+        from hamiltonian_sph import HamiltonianSPHSimulator
+
+        return HamiltonianSPHSimulator
+
+    known = ", ".join(["gns", "hamiltonian_sph"])
+    raise ValueError(f"Unknown method '{method_name}'. known: {known}")

@@ -5,24 +5,34 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "h5py>=3.14.0",
-    "matplotlib>=3.10.7",
     "numpy>=2.3.3",
-    "pysph>=1.0b2",
-    "pymunk>=7.1.0",
     "pyyaml>=6.0.2",
-    "ruff>=0.14.1",
-    "tensorboard>=2.20.0",
-    "torch-geometric>=2.7.0",
-    "torch>=2.7.0",
-    "torchvision>=0.22.0",
     "tqdm>=4.67.1",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.14.1",
+    "pytest>=7.4.2",
 ]
+full = [
+    "h5py>=3.14.0",
+    "matplotlib>=3.10.7",
+    "pysph>=1.0b2",
+    "pymunk>=7.1.0",
+    "tensorboard>=2.20.0",
+    "torch-geometric>=2.7.0",
+    "torch>=2.7.0",
+    "torchvision>=0.22.0",
+]
+
+[tool.uv]
+# デフォルトで heavy な full グループを含める（通常の uv sync は全依存を入れる）
+# 使用例:
+#   uv sync                         # これまで通り全依存（dev+full）をインストール
+#   uv sync --no-default-groups     # 軽量セットのみ
+#   uv sync --no-default-groups --group dev   # 軽量+dev
+default-groups = ["dev", "full"]
 
 [[tool.uv.index]]
 name = "pytorch-cu129"

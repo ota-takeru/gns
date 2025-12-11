@@ -10,9 +10,10 @@ def _build_dummy_sim():
         "velocity": {"mean": torch.zeros(2), "std": torch.ones(2)},
     }
     boundaries = torch.tensor([[0.0, 1.0], [0.0, 1.0]])
+    # node feature dim = velocity(5*2) + boundary(2*2) + type_emb(4) = 18
     return GNSSimulator(
         particle_dimensions=2,
-        nnode_in=8,
+        nnode_in=18,
         nedge_in=3,
         latent_dim=16,
         nmessage_passing_steps=2,
