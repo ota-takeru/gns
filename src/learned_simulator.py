@@ -1,3 +1,5 @@
+from abc import ABC, abstractmethod
+
 import numpy as np
 import torch
 from torch import nn
@@ -6,7 +8,41 @@ from torch_geometric.nn import radius_graph
 import graph_network
 
 
-class LearnedSimulator(nn.Module):
+class BaseSimulator(nn.Module, ABC):
+    """手法ごとの共通インタフェース。新規手法はこれを継承して実装する。"""
+
+    @abstractmethod
+    def predict_positions(
+        self,
+        current_positions: torch.Tensor,
+        nparticles_per_example: torch.Tensor,
+        particle_types: torch.Tensor,
+        material_property: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        ...
+
+    @abstractmethod
+    def predict_accelerations(
+        self,
+        next_positions: torch.Tensor,
+        position_sequence_noise: torch.Tensor,
+        position_sequence: torch.Tensor,
+        nparticles_per_example: torch.Tensor,
+        particle_types: torch.Tensor,
+        material_property: torch.Tensor | None,
+    ):
+        ...
+
+    @abstractmethod
+    def save(self, path: str = "model.pt"):
+        ...
+
+    @abstractmethod
+    def load(self, path: str):
+        ...
+
+
+class GNSSimulator(BaseSimulator):
     def __init__(
         self,
         particle_dimensions: int,  # 粒子の位置次元数
@@ -289,3 +325,20 @@ def time_diff(  # 速度列を計算
     position_sequence: torch.Tensor,
 ) -> torch.Tensor:
     return position_sequence[:, 1:] - position_sequence[:, :-1]
+
+
+# 互換性のためのエイリアス
+LearnedSimulator = GNSSimulator
+
+# 手法レジストリ。新しい手法はここに追加する。
+METHOD_REGISTRY = {
+    "gns": GNSSimulator,
+}
+
+
+def get_simulator_class(method_name: str):
+    try:
+        return METHOD_REGISTRY[method_name]
+    except KeyError as exc:  # pragma: no cover - defensive
+        known = ", ".join(sorted(METHOD_REGISTRY))
+        raise ValueError(f"Unknown method '{method_name}'. known: {known}") from exc

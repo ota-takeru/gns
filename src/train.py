@@ -21,9 +21,11 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import data_loader
+from losses import acceleration_loss, get_loss
 
 # --- gns モジュール群(あなたの環境のパスに応じて調整してください) ---
 import learned_simulator
+from learned_simulator import BaseSimulator, get_simulator_class
 import noise_utils
 import reading_utils
 from scenarios import Scenario, ScenarioRegistry
@@ -69,6 +71,8 @@ class Config:
     data_path: str = "./datasets/"
     scenario: str = "fluid"
     scenario_options: dict[str, dict[str, Any]] = field(default_factory=dict)
+    method: str = "gns"  # 使用する手法識別子
+    method_options: dict[str, dict[str, Any]] = field(default_factory=dict)
     active_scenario: Scenario | None = field(default=None, repr=False)
     model_path: str = "./models/"
     output_path: str = "./rollouts/"
@@ -76,6 +80,8 @@ class Config:
 
     batch_size: int = 2
     noise_std: float = 6.7e-4
+    noise: str = "random_walk"
+    loss: str = "acceleration"
     log_interval: int = 10
 
     ntraining_steps: int = int(2e7)
@@ -144,24 +150,8 @@ def optimizer_to(optim: torch.optim.Optimizer, device: torch.device):
                         sub._grad.data = sub._grad.data.to(device)
 
 
-def acceleration_loss(
-    pred_acc: torch.Tensor,
-    target_acc: torch.Tensor,
-    non_kinematic_mask: torch.Tensor,  # 学習に用いる粒子がtrue
-) -> torch.Tensor:  # 加速度のロス計算
-    loss = (pred_acc - target_acc) ** 2
-    loss = loss.sum(dim=-1)  # D 次元を和
-    num_non_kinematic = non_kinematic_mask.sum()  # 学習に用いる粒子数
-    masked = torch.where(
-        non_kinematic_mask.bool(), loss, torch.zeros_like(loss)
-    )  # 学習に用いる粒子のみロスを考慮
-    return masked.sum() / num_non_kinematic.clamp(
-        min=1
-    )  # 平均を取る(clampはゼロ除算防止)
-
-
 def save_model_and_train_state(
-    simulator: learned_simulator.LearnedSimulator | DDP,
+    simulator: BaseSimulator | DDP,
     cfg: Config,
     step: int,
     epoch: int,
@@ -313,8 +303,8 @@ def _cleanup_distributed() -> None:
 
 
 def _unwrap_simulator(
-    simulator: learned_simulator.LearnedSimulator | DDP,
-) -> learned_simulator.LearnedSimulator:
+    simulator: BaseSimulator | DDP,
+) -> BaseSimulator:
     """Return the underlying simulator when wrapped with DDP."""
     return simulator.module if isinstance(simulator, DDP) else simulator
 
@@ -360,9 +350,7 @@ class RolloutEvaluator:
         self._max_examples = max(1, int(max_examples))
         self._iterator: Any | None = None
 
-    def evaluate(
-        self, simulator: learned_simulator.LearnedSimulator
-    ) -> dict[str, float | None]:
+    def evaluate(self, simulator: BaseSimulator) -> dict[str, float | None]:
         metrics_list: list[dict[str, float]] = []
         for _ in range(self._max_examples):
             example = self._next_example()
@@ -397,7 +385,7 @@ class RolloutEvaluator:
                 return None
 
     def _evaluate_example(
-        self, simulator: learned_simulator.LearnedSimulator, example: tuple
+        self, simulator: BaseSimulator, example: tuple
     ) -> dict[str, float] | None:
         if len(example) == 4:
             positions, particle_type, material_property, n_particles = example
@@ -489,8 +477,9 @@ def _get_simulator(
     acc_noise_std: float,
     vel_noise_std: float,
     device: torch.device,
-) -> learned_simulator.LearnedSimulator:
-    """LearnedSimulator をメタ情報から生成"""
+    cfg: Config,
+) -> BaseSimulator:
+    """メタ情報と設定から Simulator を生成"""
     normalization_stats = {
         "acceleration": {
             "mean": torch.FloatTensor(metadata["acc_mean"]).to(device),
@@ -529,22 +518,28 @@ def _get_simulator(
         raise ValueError(msg)
     boundary_clamp_limit = float(metadata.get("boundary_augment", 1.0))
 
-    simulator = learned_simulator.LearnedSimulator(
-        particle_dimensions=metadata["dim"],
-        nnode_in=nnode_in,
-        nedge_in=nedge_in,
-        latent_dim=128,
-        nmessage_passing_steps=10,
-        nmlp_layers=2,
-        mlp_hidden_dim=128,
-        connectivity_radius=metadata["default_connectivity_radius"],
-        normalization_stats=normalization_stats,
-        nparticle_types=NUM_PARTICLE_TYPES,
-        particle_type_embedding_size=16,
-        boundaries=boundaries,
-        boundary_clamp_limit=boundary_clamp_limit,
-        device=device,
-    )
+    method_name = getattr(cfg, "method", "gns")
+    method_options_all = getattr(cfg, "method_options", {}) or {}
+    method_options = method_options_all.get(method_name, {})
+
+    base_kwargs = {
+        "particle_dimensions": metadata["dim"],
+        "nnode_in": nnode_in,
+        "nedge_in": nedge_in,
+        "latent_dim": 128,
+        "nmessage_passing_steps": 10,
+        "nmlp_layers": 2,
+        "mlp_hidden_dim": 128,
+        "connectivity_radius": metadata["default_connectivity_radius"],
+        "normalization_stats": normalization_stats,
+        "nparticle_types": NUM_PARTICLE_TYPES,
+        "particle_type_embedding_size": 16,
+        "boundaries": boundaries,
+        "boundary_clamp_limit": boundary_clamp_limit,
+        "device": device,
+    }
+    SimulatorClass = get_simulator_class(method_name)
+    simulator = SimulatorClass(**(base_kwargs | method_options))
     return simulator
 
 
@@ -552,7 +547,7 @@ def _get_simulator(
 # 予測系(rollout / validation / predict)
 # -----------------------
 def rollout(
-    simulator: learned_simulator.LearnedSimulator | DDP,
+    simulator: BaseSimulator | DDP,
     position: torch.Tensor,
     particle_types: torch.Tensor,
     material_property: torch.Tensor | None,
@@ -616,12 +611,13 @@ def rollout(
 
 
 def validation(
-    simulator: learned_simulator.LearnedSimulator,
+    simulator: BaseSimulator,
     example: tuple,
     feature_components: int,
     cfg: Config,
     device: torch.device,
 ) -> torch.Tensor:
+    loss_fn = get_loss(cfg.loss)
     position = example[0][0].to(device)
     particle_type = example[0][1].to(device)
     if feature_components == 4:
@@ -634,9 +630,10 @@ def validation(
         raise NotImplementedError
     labels = example[1].to(device)
 
-    sampled_noise = noise_utils.get_random_walk_noise_for_position_sequence(
-        position, noise_std_last_step=cfg.noise_std
-    ).to(device)
+    noise_sampler = noise_utils.get_noise(cfg.noise)
+    sampled_noise = noise_sampler(position, noise_std_last_step=cfg.noise_std).to(
+        device
+    )
     non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
     sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
@@ -649,7 +646,7 @@ def validation(
             particle_types=particle_type,
             material_property=material_property,
         )
-    loss = acceleration_loss(pred_acc, target_acc, non_kinematic_mask)
+    loss = loss_fn(pred_acc, target_acc, non_kinematic_mask)
     return loss
 
 
@@ -661,7 +658,7 @@ def predict(cfg: Config, device: torch.device):
         else "rollout"
     )
     metadata = reading_utils.read_metadata(cfg.data_path, metadata_key)
-    simulator = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
+    simulator = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device, cfg)
 
     # モデル読み込み
     model_path = _resolve_model_path(cfg)
@@ -671,8 +668,8 @@ def predict(cfg: Config, device: torch.device):
     simulator.to(device)
     simulator.eval()
 
-    # 出力ディレクトリ
-    Path(cfg.output_path).mkdir(parents=True, exist_ok=True)
+    # 出力ディレクトリ（method/run_id単位）
+    output_dir = _resolve_output_directory(cfg)
 
     # valid.npz がなければ test.npz
     valid_npz = Path(cfg.data_path) / "valid.npz"
@@ -742,8 +739,7 @@ def predict(cfg: Config, device: torch.device):
             if cfg.mode == "rollout":
                 example_rollout["loss"] = loss.mean()
                 filename = f"{cfg.output_filename}_ex{example_i}.pkl"
-                filename = str(Path(cfg.output_path) / filename)
-                with Path(filename).open("wb") as f:
+                with (output_dir / filename).open("wb") as f:
                     pickle.dump(example_rollout, f)
 
     print(f"Mean loss on rollout prediction: {torch.mean(torch.cat(eval_loss))}")
@@ -761,6 +757,15 @@ def _prepare_model_directory(cfg: Config) -> None:
 
     # Stash base directory for later lookup (e.g., inference latest resolution).
     setattr(cfg, "model_base_path", str(base_dir))
+
+
+def _resolve_output_directory(cfg: Config) -> Path:
+    """rollout/valid 出力を method/run_id (=output_filename) 配下にまとめる"""
+    base_dir = Path(cfg.output_path).expanduser()
+    run_dir = base_dir / cfg.method / cfg.output_filename
+    run_dir.mkdir(parents=True, exist_ok=True)
+    setattr(cfg, "resolved_output_dir", str(run_dir))
+    return run_dir
 
     needs_run_dir = cfg.mode == "train" and cfg.model_file is None
     distributed = (
@@ -869,8 +874,10 @@ def train(cfg: Config, device: torch.device):
     )
     metadata = reading_utils.read_metadata(cfg.data_path, metadata_key)
 
-    simulator_core = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device)
+    simulator_core = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device, cfg)
     simulator_core.to(device)
+    noise_sampler = noise_utils.get_noise(cfg.noise)
+    loss_fn = get_loss(cfg.loss)
 
     resume_state: dict[str, Any] | None = None
     step = 0
@@ -922,9 +929,7 @@ def train(cfg: Config, device: torch.device):
         if device.type == "cuda":
             ddp_kwargs["device_ids"] = [device.index]
             ddp_kwargs["output_device"] = device.index
-        simulator: learned_simulator.LearnedSimulator | DDP = DDP(
-            simulator_core, **ddp_kwargs
-        )
+        simulator: BaseSimulator | DDP = DDP(simulator_core, **ddp_kwargs)
     else:
         simulator = simulator_core
 
@@ -1313,7 +1318,7 @@ def train(cfg: Config, device: torch.device):
                     raise NotImplementedError
                 labels = labels.to(device)
 
-                sampled_noise = noise_utils.get_random_walk_noise_for_position_sequence(
+                sampled_noise = noise_sampler(
                     position, noise_std_last_step=cfg.noise_std
                 ).to(device)
                 non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
@@ -1336,9 +1341,7 @@ def train(cfg: Config, device: torch.device):
                         particle_types=particle_type,
                         material_property=material_property,
                     )
-                    loss_tensor = acceleration_loss(
-                        pred_acc, target_acc, non_kinematic_mask
-                    )
+                    loss_tensor = loss_fn(pred_acc, target_acc, non_kinematic_mask)
 
                 train_loss_micro = float(loss_tensor.item())
                 micro_loss_accum += train_loss_micro

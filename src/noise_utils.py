@@ -29,3 +29,16 @@ def get_random_walk_noise_for_position_sequence(
         velocity_sequence_noise, dim=1
     )  # 速度の累積和は位置
     return position_sequence_noise
+
+
+NOISE_REGISTRY = {
+    "random_walk": get_random_walk_noise_for_position_sequence,
+}
+
+
+def get_noise(name: str = "random_walk"):
+    try:
+        return NOISE_REGISTRY[name]
+    except KeyError as exc:  # pragma: no cover - defensive
+        known = ", ".join(sorted(NOISE_REGISTRY))
+        raise ValueError(f"Unknown noise '{name}'. known: {known}") from exc
