@@ -9,12 +9,16 @@ scenario_options:
     dataset: ./datasets/out_fluid/dam_break_left
     rollout_dataset: valid
     description: PySPH-based dam break fluid dataset
+method: gns           # 使用する手法（gns で従来挙動）
+method_options: {}    # 手法固有の追加ハイパラ
 model_path: ./models/ # モデルやtrain_stateの保存先
 output_path: ./rollouts/
 output_filename: rollout
 
 batch_size: 32
 noise_std: 0.0003
+noise: random_walk     # ノイズ生成の種類（デフォルト従来挙動）
+loss: acceleration     # ロス関数（デフォルト従来挙動）
 
 # トレーニング
 ntraining_steps: 1000000

@@ -9,6 +9,8 @@ scenario_options:
   fluid:
     dataset: ./datasets/out_fluid/dam_break_left
     rollout_dataset: valid
+method: gns
+method_options: {}
 model_path: ./models/ # 学習済みモデルの格納先
 output_path: ./rollouts/ # 推論結果(pklなど)の出力先
 output_filename: rollout # 出力ファイル名の接頭辞
@@ -19,4 +21,6 @@ model_file: latest
 # 推論（rollout）時の制御
 rollout_inference_max_examples: 2 # 生成するシーン（pkl）数の上限。null で全件
 noise_std: 0.0003 # 正規化統計用のノイズ設定（推論で参照）
+noise: random_walk
+loss: acceleration
 cuda_device_number: null # null で自動選択

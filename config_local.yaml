@@ -1,11 +1,15 @@
 mode: train
 data_path: ./datasets/out/
+method: gns
+method_options: {}
 model_path: ./models/test_run/
 output_path: ./rollouts/test_run/
 output_filename: rollout
 
 batch_size: 2
 noise_std: 0.00067
+noise: random_walk
+loss: acceleration
 
 ntraining_steps: 100
 validation_interval: null
