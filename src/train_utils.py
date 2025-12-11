@@ -62,6 +62,7 @@ def save_model_and_train_state(
     step: int,
     epoch: int,
     optimizer: torch.optim.Optimizer,
+    scaler: Any | None,
     train_loss: float | None,
     valid_loss: float | None,
     train_loss_hist: list[tuple[int, float]],
@@ -80,6 +81,7 @@ def save_model_and_train_state(
             "train_loss": train_loss,
             "valid_loss": valid_loss,
         },
+        scaler_state=scaler.state_dict() if scaler is not None else None,
         loss_history={"train": train_loss_hist, "valid": valid_loss_hist},
         used_config=_asjsonable_cfg(cfg),
     )

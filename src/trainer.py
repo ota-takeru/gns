@@ -12,7 +12,7 @@ import data_loader
 import noise_utils
 import reading_utils
 from losses import get_loss
-from rollout_utils import RolloutEvaluator, validation
+from rollout_utils import RolloutEvaluator
 from simulator_factory import _get_simulator
 from train_config import (
     INPUT_SEQUENCE_LENGTH,
@@ -128,6 +128,8 @@ def train(cfg: Config, device: torch.device):
         scaler = GradScaler(device_type=device.type, enabled=amp_enabled)
     else:
         scaler = GradScaler(enabled=amp_enabled)
+    if resume_state is not None and resume_state.get("scaler_state") is not None:
+        scaler.load_state_dict(resume_state["scaler_state"])
 
     log_interval = max(1, int(cfg.log_interval))
     tensorboard_interval = (
@@ -211,7 +213,6 @@ def train(cfg: Config, device: torch.device):
 
     validation_interval = cfg.validation_interval
     dl_valid = None
-    dl_valid_iter = None
     if is_main_process and validation_interval is not None:
         valid_dataset = data_loader.SamplesDataset(
             path=Path(cfg.data_path) / "valid.npz",
@@ -236,17 +237,58 @@ def train(cfg: Config, device: torch.device):
         if cfg.prefetch_factor is not None and cfg.num_workers > 0:
             valid_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
         dl_valid = torch.utils.data.DataLoader(valid_dataset, **valid_loader_kwargs)
-        dl_valid_iter = iter(dl_valid)
 
-    def _next_valid_example():
-        nonlocal dl_valid_iter
-        if dl_valid is None or dl_valid_iter is None:
+    def _run_validation_full():
+        """検証データ全体で平均ロスを計算する"""
+        if dl_valid is None:
             return None
-        try:
-            return next(dl_valid_iter)
-        except StopIteration:
-            dl_valid_iter = iter(dl_valid)
-            return next(dl_valid_iter)
+        total = 0.0
+        count = 0
+        with torch.no_grad():
+            for example_valid in dl_valid:
+                features_v, labels_v = example_valid
+                position_v = features_v[0].to(device)
+                particle_type_v = features_v[1].to(device)
+                if len(features_v) == 4:
+                    material_property_v = features_v[2].to(device)
+                    n_particles_v = features_v[3].to(device)
+                elif len(features_v) == 3:
+                    material_property_v = None
+                    n_particles_v = features_v[2].to(device)
+                else:
+                    raise NotImplementedError
+                labels_v = labels_v.to(device)
+
+                noise_v = noise_sampler(
+                    position_v, noise_std_last_step=cfg.noise_std
+                ).to(device)
+                non_kinematic_mask_v = (particle_type_v != KINEMATIC_PARTICLE_ID).to(
+                    device
+                )
+                noise_v *= non_kinematic_mask_v.view(-1, 1, 1)
+
+                autocast_kwargs_v: dict[str, Any] = {
+                    "enabled": amp_enabled,
+                }
+                if amp_enabled:
+                    autocast_kwargs_v["dtype"] = amp_dtype
+                if _AMP_AUTOCAST_SUPPORTS_DEVICE_TYPE:
+                    autocast_kwargs_v["device_type"] = device.type
+                with autocast(**autocast_kwargs_v):
+                    pred_acc_v, target_acc_v = simulator.predict_accelerations(
+                        next_positions=labels_v,
+                        position_sequence_noise=noise_v,
+                        position_sequence=position_v,
+                        nparticles_per_example=n_particles_v,
+                        particle_types=particle_type_v,
+                        material_property=material_property_v,
+                    )
+                    loss_v = loss_fn(pred_acc_v, target_acc_v, non_kinematic_mask_v)
+                total += float(loss_v.item())
+                count += 1
+        if count == 0:
+            return None
+        return total / count
 
     rollout_evaluator: RolloutEvaluator | None = None
     rollout_interval = (
@@ -344,18 +386,10 @@ def train(cfg: Config, device: torch.device):
             and step > 0
             and step % validation_interval == 0
         ):
-            sampled_valid_example = _next_valid_example()
-            if sampled_valid_example is not None:
-                with torch.no_grad():
-                    valid_loss_tensor = validation(
-                        simulator,
-                        sampled_valid_example,
-                        feature_components,
-                        cfg,
-                        device,
-                    )
-                valid_loss = valid_loss_tensor
-                latest_valid_loss_value = float(valid_loss_tensor.item())
+            valid_loss_value = _run_validation_full()
+            if valid_loss_value is not None:
+                valid_loss = torch.tensor(valid_loss_value, device=device)
+                latest_valid_loss_value = float(valid_loss_value)
                 print(f"[valid @ step {step}] {latest_valid_loss_value:.6f}")
                 if tb_writer is not None:
                     tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
@@ -469,6 +503,7 @@ def train(cfg: Config, device: torch.device):
                 step,
                 epoch,
                 optimizer,
+                scaler,
                 train_loss,
                 float(valid_loss.item()) if valid_loss is not None else None,
                 train_loss_hist,
@@ -545,25 +580,17 @@ def train(cfg: Config, device: torch.device):
             if is_main_process:
                 train_loss_hist.append((epoch, float(epoch_avg)))
                 if dl_valid is not None and validation_interval is not None:
-                    sampled_valid_example = _next_valid_example()
-                    if sampled_valid_example is not None:
-                        with torch.no_grad():
-                            epoch_valid_loss = validation(
-                                simulator,
-                                sampled_valid_example,
-                                feature_components,
-                                cfg,
-                                device,
-                            )
-                        epoch_valid_loss_float = float(epoch_valid_loss.item())
-                        valid_loss_hist.append((epoch, epoch_valid_loss_float))
-                        latest_valid_loss_value = epoch_valid_loss_float
+                    epoch_valid_loss_val = _run_validation_full()
+                    if epoch_valid_loss_val is not None:
+                        epoch_valid_loss = torch.tensor(epoch_valid_loss_val, device=device)
+                        valid_loss_hist.append((epoch, float(epoch_valid_loss_val)))
+                        latest_valid_loss_value = float(epoch_valid_loss_val)
                         print(
-                            f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
+                            f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_val:.6f}"
                         )
                         if tb_writer is not None:
                             tb_writer.add_scalar(
-                                "epoch/valid_loss", epoch_valid_loss_float, epoch
+                                "epoch/valid_loss", float(epoch_valid_loss_val), epoch
                             )
                     else:
                         print(
@@ -595,6 +622,7 @@ def train(cfg: Config, device: torch.device):
                 step,
                 epoch,
                 optimizer,
+                scaler,
                 train_loss,
                 float(valid_loss.item()) if valid_loss is not None else None,
                 train_loss_hist,
