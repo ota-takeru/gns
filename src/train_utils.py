@@ -206,6 +206,20 @@ def _cleanup_distributed() -> None:
         dist.destroy_process_group()
 
 
+def make_worker_init_fn(base_seed: int):
+    """DataLoader向けワーカー初期化関数を生成し、各ワーカーで乱数シードを固定する。"""
+
+    def _init(worker_id: int) -> None:
+        seed = base_seed + worker_id
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+    return _init
+
+
 def _unwrap_simulator(
     simulator: BaseSimulator | DDP,
 ) -> BaseSimulator:
@@ -281,6 +295,7 @@ __all__ = [
     "_cleanup_distributed",
     "_unwrap_simulator",
     "_set_seed",
+    "make_worker_init_fn",
     "_launch_tensorboard",
     "_compute_grad_norm",
     "_resolve_rollout_dataset_path",

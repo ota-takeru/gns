@@ -34,6 +34,7 @@ from train_utils import (
     autocast,
     optimizer_to,
     save_model_and_train_state,
+    make_worker_init_fn,
 )
 
 
@@ -193,19 +194,45 @@ def train(cfg: Config, device: torch.device):
         if distributed
         else None
     )
-    train_loader_kwargs: dict[str, Any] = {
-        "batch_size": cfg.batch_size,
-        "shuffle": train_sampler is None,
-        "sampler": train_sampler,
-        "num_workers": cfg.num_workers,
-        "persistent_workers": cfg.persistent_workers if cfg.num_workers > 0 else False,
-        "pin_memory": cfg.pin_memory,
-        "drop_last": drop_last,
-        "collate_fn": data_loader.collate_fn,
-    }
-    if cfg.prefetch_factor is not None and cfg.num_workers > 0:
-        train_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
-    dl = torch.utils.data.DataLoader(train_dataset, **train_loader_kwargs)
+
+    dataloader_generator = torch.Generator(device="cpu").manual_seed(
+        cfg.seed + cfg.rank
+    )
+    worker_init_fn = make_worker_init_fn(cfg.seed + cfg.rank * 10000)
+
+    def _build_dataloader(
+        dataset: torch.utils.data.Dataset,
+        *,
+        batch_size: int,
+        shuffle: bool,
+        sampler: Any | None,
+        drop_last: bool,
+    ) -> torch.utils.data.DataLoader:
+        kwargs: dict[str, Any] = {
+            "batch_size": batch_size,
+            "shuffle": shuffle if sampler is None else False,
+            "sampler": sampler,
+            "num_workers": cfg.num_workers,
+            "persistent_workers": (
+                cfg.persistent_workers if cfg.num_workers > 0 else False
+            ),
+            "pin_memory": cfg.pin_memory,
+            "drop_last": drop_last,
+            "collate_fn": data_loader.collate_fn,
+            "generator": dataloader_generator,
+            "worker_init_fn": worker_init_fn,
+        }
+        if cfg.prefetch_factor is not None and cfg.num_workers > 0:
+            kwargs["prefetch_factor"] = cfg.prefetch_factor
+        return torch.utils.data.DataLoader(dataset, **kwargs)
+
+    dl = _build_dataloader(
+        train_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
+        drop_last=drop_last,
+    )
 
     train_start_time = time.perf_counter()
     ema_step_time: float | None = None
@@ -223,20 +250,13 @@ def train(cfg: Config, device: torch.device):
         if len(valid_dataset[0][0]) != feature_components:
             msg = "`valid.npz` と `train.npz` の特徴数が一致していません。"
             raise ValueError(msg)
-        valid_loader_kwargs: dict[str, Any] = {
-            "batch_size": cfg.batch_size,
-            "shuffle": False,
-            "num_workers": cfg.num_workers,
-            "persistent_workers": cfg.persistent_workers
-            if cfg.num_workers > 0
-            else False,
-            "pin_memory": cfg.pin_memory,
-            "drop_last": False,
-            "collate_fn": data_loader.collate_fn,
-        }
-        if cfg.prefetch_factor is not None and cfg.num_workers > 0:
-            valid_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
-        dl_valid = torch.utils.data.DataLoader(valid_dataset, **valid_loader_kwargs)
+        dl_valid = _build_dataloader(
+            valid_dataset,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            sampler=None,
+            drop_last=False,
+        )
 
     def _run_validation_full():
         """検証データ全体で平均ロスを計算する"""
