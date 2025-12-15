@@ -33,6 +33,25 @@ class BaseSimulator(nn.Module, ABC):
     ):
         ...
 
+    # DDP で forward 経由でも呼び出せるように predict_accelerations を委譲
+    def forward(
+        self,
+        next_positions: torch.Tensor,
+        position_sequence_noise: torch.Tensor,
+        position_sequence: torch.Tensor,
+        nparticles_per_example: torch.Tensor,
+        particle_types: torch.Tensor,
+        material_property: torch.Tensor | None = None,
+    ):
+        return self.predict_accelerations(
+            next_positions=next_positions,
+            position_sequence_noise=position_sequence_noise,
+            position_sequence=position_sequence,
+            nparticles_per_example=nparticles_per_example,
+            particle_types=particle_types,
+            material_property=material_property,
+        )
+
     @abstractmethod
     def save(self, path: str = "model.pt"):
         ...
@@ -84,8 +103,23 @@ class GNSSimulator(BaseSimulator):
         self._boundary_clamp_limit = boundary_clamp_limit
         self._device = device
 
-    def forward(self):
-        pass
+    def forward(
+        self,
+        next_positions: torch.Tensor,
+        position_sequence_noise: torch.Tensor,
+        position_sequence: torch.Tensor,
+        nparticles_per_example: torch.Tensor,
+        particle_types: torch.Tensor,
+        material_property: torch.Tensor | None = None,
+    ):
+        return super().forward(
+            next_positions=next_positions,
+            position_sequence_noise=position_sequence_noise,
+            position_sequence=position_sequence,
+            nparticles_per_example=nparticles_per_example,
+            particle_types=particle_types,
+            material_property=material_property,
+        )
 
     def _compute_graph_connectivity(
         self,

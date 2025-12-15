@@ -513,7 +513,7 @@ def train(cfg: Config, device: torch.device):
                     autocast_kwargs["device_type"] = device.type
                 autocast_ctx = autocast(**autocast_kwargs)
                 with autocast_ctx:
-                    pred_acc, target_acc = simulator.predict_accelerations(
+                    pred_acc, target_acc = simulator(
                         next_positions=labels,
                         position_sequence_noise=sampled_noise,
                         position_sequence=position,

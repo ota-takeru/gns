@@ -12,6 +12,7 @@ scenario_options:
 method: gns
 method_options: {}
 model_path: ./models/ # 学習済みモデルの格納先
+# Kaggle で Add data を使う場合は /kaggle/input/<dataset-name>/models などに置き換える
 output_path: ./rollouts/ # 推論結果(pklなど)の出力先
 output_filename: rollout # 出力ファイル名の接頭辞
 

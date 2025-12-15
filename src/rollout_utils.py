@@ -193,7 +193,7 @@ def validation(
     sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
     with torch.no_grad():
-        pred_acc, target_acc = simulator.predict_accelerations(
+        pred_acc, target_acc = simulator(
             next_positions=labels,
             position_sequence_noise=sampled_noise,
             position_sequence=position,
