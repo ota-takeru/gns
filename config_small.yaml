@@ -1,9 +1,15 @@
 mode: train
-data_path: ./datasets/out_small
+data_path: ./datasets/out_fluid/dam_break_left
 scenario: fluid
 scenario_options: {}
-method: gns
-method_options: {}
+method: hamiltonian_sph
+method_options:
+  hamiltonian_sph:
+    sph:
+      rest_density: 1000.0
+    integrator:
+      dt: 0.006
+    gravity: [0.0, -9.81]
 model_path: ./models_small
 output_path: ./rollouts_small
 output_filename: rollout
@@ -26,7 +32,7 @@ log_interval: 1
 tensorboard_interval: null
 tensorboard_port: null
 tensorboard_host: null
-lr_init: 0.001
+lr_init: 0.0001
 lr_decay: 0.1
 lr_decay_steps: 1000
 model_file: null
