@@ -79,7 +79,8 @@ seed: 42
 enable_ddp: true
 ddp_backend: nccl
 ddp_timeout_sec: 1800
-ddp_find_unused_parameters: false
+# 使われていないパラメータを探すかどうか（デフォルト: true）
+ddp_find_unused_parameters: true
 amp_enable: true
 amp_dtype: float16
 gradient_accumulation_steps: 1

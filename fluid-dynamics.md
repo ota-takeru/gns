@@ -10,24 +10,26 @@
 $$
 \frac{D\rho}{Dt} = -\rho\,(\nabla \cdot \mathbf{v}) 
 $$
-- $\nabla \cdot \mathbf{v} = \left(\frac{ \partial v_x}{\partial x} + \frac{\partial v_y}{\partial y} + \frac{\partial v_z}{\partial z}\right)$ : 体積の変化率と考えられる(空間的な速度の変化が大きいほど体積が増える)
-  
-つまり、密度の変化率が、流体の体積変化率(発散)に比例することを表している。
+- $\nabla \cdot \mathbf{v} = \left(\frac{ \partial v_x}{\partial x} + \frac{\partial v_y}{\partial y} + \frac{\partial v_z}{\partial z}\right)$ : 体積が膨張/収縮する速さと考えられる。
+1次元で考えると、左から右に進むとき右の面が左の面より速度が速いとき体積が増える。
+$$
+\frac{ \partial v_x}{\partial x} \approx \frac{v_x(x+ \Delta x) - v_x(x)}{\Delta x}
+$$
+つまり、密度の変化率が、流体の体積変化率に比例することを表している。
 
 **運動方程式（オイラー方程式）**
 
 $$
-\frac{D \mathbf{v}}{Dt} = -\frac{1}{\rho} \nabla p + \mathbf{g}
+\frac{D \mathbf{v}}{Dt} = -\frac{1}{\rho} \nabla p
 $$
-左右の面に働く圧力の差がその点での圧力になる。
-その差を体積で割ったのが圧力の勾配$\nabla p$に対応する。
+$\nabla p = \left(\frac{ \partial p}{\partial x}, \frac{\partial p}{\partial y}, \frac{\partial p}{\partial z}\right)$
+左右の面に働く圧力による合力は、以下の様に表される。
+$$
+f_x = p(x)A - p(x+ \Delta x)A = -\left(p(x+ \Delta x) - p(x)\right)A \approx -\frac{\partial p}{\partial x} \Delta x A = -\frac{\partial p}{\partial x} \Delta V = -\frac{1}{\rho} \frac{\partial p}{\partial x} \Delta m
+$$
 
-圧力は密度の関数で与えられる。
-$$
-p = p(\rho)
-$$
-これは扱う流体によって異なる。例えば、水などの非圧縮性流体を近似する際は以下の式を用いる。
-tait方程式:
+圧力の定義は扱う流体によって異なる。例えば、水などの非圧縮性流体を近似する際(弱圧縮)は以下の式を用いる。
+Tait方程式:
 $$
 p = B \left[ \left( \frac{\rho}{\rho_0} \right)^\gamma - 1 \right]
 $$
@@ -56,7 +58,7 @@ $$
 
 $$
 A(\mathbf{r})
-\approx \int A(\mathbf{r}')\,W(\mathbf{r} - \mathbf{r}', h)\,d\mathbf{r}' + O(h^2),
+\approx \int A(\mathbf{r}')\,W(\mathbf{r} - \mathbf{r}', h)\,d\mathbf{r}'
 \quad
 \int W(\mathbf{r} - \mathbf{r}', h)\,d\mathbf{r}' = 1
 $$  
@@ -176,7 +178,8 @@ $$
 \frac{D\rho}{Dt} &= -\rho\,(\nabla \cdot \mathbf{v}) \\
 &= \mathbf{v}\cdot \nabla \rho - \nabla \cdot (\rho \mathbf{v}) \\
 &\approx \mathbf{v}_a \cdot \sum_b m_b \nabla_a W_{ab} - \sum_b m_b \mathbf{v}_b \cdot \nabla_a W_{ab} \\
-&\approx \sum_b m_b \mathbf{v}_a \cdot \nabla_a W_{ab} - \sum_b m_b \mathbf{v}_b \cdot \nabla_a W_{ab}
+&\approx \sum_b m_b \mathbf{v}_a \cdot \nabla_a W_{ab} - \sum_b m_b \mathbf{v}_b \cdot \nabla_a W_{ab} \\
+&= \sum_b m_b (\mathbf{v}_a - \mathbf{v}_b)\cdot \nabla_a W_{ab}
 \end{aligned}
 $$
 
@@ -275,7 +278,7 @@ $$
 ## 4. 粘性項
 
 粘性が考慮された流体では、以下の運動方程式が用いられる。
-**ナビエ・ストークス方程式**
+**ナビエ・ストークス方程式（非圧縮）**
 
 $$
 \frac{D \mathbf{v}}{Dt} = -\frac{1}{\rho} \nabla p + \nu \nabla^2 \mathbf{v}
@@ -287,12 +290,12 @@ $$
 
 $\nu \nabla^2 \mathbf{v} = \nu \frac{\partial^2 \mathbf{v}}{\partial x^2} + \nu \frac{\partial^2 \mathbf{v}}{\partial y^2} + \nu \frac{\partial^2 \mathbf{v}}{\partial z^2}$ 
 
-２枚の板の間に流体がある(クェット流れ)を考える。
+２枚の板の間に流体がある(クエット流れ)を考える。
 この時、x軸方向に流体が流れるとするとせん断応力はx軸方向に働く力で以下の式で書ける。
 $$
 \tau = \mu \frac{du(y)}{dy}
 $$
-- $\mu$ : 動粘性係数
+- $\mu$ : 粘性係数
 - $u(y)$ : 流体の速度
 つまり、速度の空間的な変化率が大きいほどせん断応力が大きくなる。
 
@@ -397,5 +400,5 @@ $$
 \approx 2 \nu \sum_b \frac{m_b}{\rho_b} \frac{(\mathbf{v}_b - \mathbf{v}_a)}{|\mathbf{r}_b - \mathbf{r}_a|^2}(\mathbf{r}_b - \mathbf{r}_a) \cdot \nabla_a W_{ab}
 $$
 と同じ形をしている。
-よって、人工粘性項はナビエ・ストークス方程式の粘性項の離散化とみなすことができる。
+よって、人工粘性項は有効粘性として解釈できる。
 
