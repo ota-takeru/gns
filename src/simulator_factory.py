@@ -89,6 +89,25 @@ def _get_simulator(
         method_options["hamiltonian_net"] = _maybe(HamiltonianNetConfig, "hamiltonian_net")
         method_options["integrator"] = _maybe(IntegratorConfig, "integrator")
 
+        # データセット側の時間刻み dt がメタデータに入っていれば、積分器に反映する。
+        # （デフォルトの 1e-3 のままだと実データの 0.006 などと大きくずれて速度推定が跳ね、
+        #  ロールアウトで粒子が不安定になりやすい）
+        dt_from_meta = metadata.get("dt")
+        if dt_from_meta is not None:
+            dt_from_meta = float(dt_from_meta)
+            integrator_cfg = method_options["integrator"] or IntegratorConfig()
+            current_dt = getattr(integrator_cfg, "dt", None)
+            # ユーザが明示指定していない、もしくは大きく乖離している場合は上書きする
+            if current_dt is None or current_dt <= 0:
+                integrator_cfg.dt = dt_from_meta
+            elif abs(current_dt - dt_from_meta) / max(dt_from_meta, 1e-9) > 0.05:
+                print(
+                    f"[simulator_factory] integrator.dt({current_dt}) を "
+                    f"データセットの dt({dt_from_meta}) に合わせて上書きします。"
+                )
+                integrator_cfg.dt = dt_from_meta
+            method_options["integrator"] = integrator_cfg
+
     SimulatorClass = get_simulator_class(method_name)
     simulator = SimulatorClass(**(base_kwargs | method_options))
     return simulator
