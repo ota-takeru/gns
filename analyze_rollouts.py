@@ -57,7 +57,8 @@ def main():
         print(f"Rolloutsディレクトリが見つかりません: {rollouts_dir}")
         return
 
-    pkl_files = sorted(rollouts_dir.glob("rollout_ex*.pkl"))
+    # サブディレクトリ（method/output_filename/など）も含めて検索
+    pkl_files = sorted(rollouts_dir.rglob("rollout_ex*.pkl"))
     if not pkl_files:
         print("rolloutファイルが見つかりません")
         return
@@ -114,4 +115,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
