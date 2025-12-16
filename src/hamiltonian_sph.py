@@ -46,6 +46,30 @@ def _cubic_spline_kernel(dist: torch.Tensor, h: float, dim: int) -> torch.Tensor
     return norm * result
 
 
+def _cubic_spline_kernel_grad(
+    rel: torch.Tensor, dist: torch.Tensor, h: float, dim: int
+) -> torch.Tensor:
+    """cubic spline の勾配 ∇W を返す。rel は x_j - x_i。"""
+
+    q = dist / (h + 1e-8)
+    grad_q = torch.zeros_like(q)
+    mask1 = q <= 1.0
+    mask2 = (q > 1.0) & (q <= 2.0)
+    grad_q = torch.where(mask1, -3.0 * q + 2.25 * q**2, grad_q)
+    grad_q = torch.where(mask2, -0.75 * (2.0 - q) ** 2, grad_q)
+
+    if dim == 2:
+        norm = 10.0 / (7.0 * math.pi * (h**2))
+    elif dim == 3:
+        norm = 1.0 / (math.pi * (h**3))
+    else:
+        norm = 2.0 / (3.0 * h)
+
+    dW_dr = norm * grad_q / (h + 1e-8)  # dW/dr
+    rel_norm = dist + 1e-8
+    return dW_dr.unsqueeze(-1) * rel / rel_norm.unsqueeze(-1)
+
+
 def _tait_internal_energy(
     rho: torch.Tensor,
     rho0: float,
@@ -75,6 +99,10 @@ class SPHConfig:
     sound_speed: float = 10.0
     gamma: float = 7.0
     max_num_neighbors: int = 128
+    # Monaghan artificial viscosity 係数
+    alpha_viscosity: float = 0.1
+    beta_viscosity: float = 0.0
+    visc_eps: float = 0.01
 
 
 @dataclass
@@ -84,7 +112,8 @@ class HamiltonianNetConfig:
     message_passing_steps: int = 4
     mlp_layers: int = 2
     mlp_hidden_dim: int = 128
-    use_velocity_in_H: bool = True
+    # 速度依存項をハミルトニアンに入れると正準形から外れるためデフォルトでオフ
+    use_velocity_in_H: bool = False
     use_density_in_H: bool = True
     node_dropout: float = 0.0
     edge_dropout: float = 0.0
@@ -219,7 +248,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
 
         self._sph = _coerce(sph, SPHConfig, SPHConfig())
         if self._sph.smoothing_length is None:
-            self._sph.smoothing_length = self._connectivity_radius
+            # cubic spline の有効半径 2h が connectivity_radius に一致するように設定
+            self._sph.smoothing_length = self._connectivity_radius * 0.5
         self._ham_cfg = _coerce(hamiltonian_net, HamiltonianNetConfig, HamiltonianNetConfig())
         self._int_cfg = _coerce(integrator, IntegratorConfig, IntegratorConfig())
 
@@ -349,8 +379,10 @@ class HamiltonianSPHSimulator(BaseSimulator):
     # ------------------------------------------------------------------
     # SPH 基本項
     def _build_edges(self, x: torch.Tensor, nparticles_per_example: torch.Tensor):
+        # cubic spline の支持が 2h までなので、近傍半径は 2 * smoothing_length に合わせる
+        radius = 2.0 * self._sph.smoothing_length
         receivers, senders = self._compute_graph_connectivity(
-            x, nparticles_per_example, self._connectivity_radius, add_self_edges=False
+            x, nparticles_per_example, radius, add_self_edges=False
         )
         rel = x[senders] - x[receivers]
         dist = rel.norm(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -360,7 +392,7 @@ class HamiltonianSPHSimulator(BaseSimulator):
             dim=-1,
         )
         edge_index = torch.stack([senders, receivers])
-        return edge_index, edge_features, dist.squeeze(-1), w.squeeze(-1)
+        return edge_index, edge_features, dist.squeeze(-1), w.squeeze(-1), rel
 
     def _compute_density(
         self,
@@ -372,7 +404,50 @@ class HamiltonianSPHSimulator(BaseSimulator):
         receivers = edge_index[1]
         contrib = kernel_vals * self._particle_mass
         rho = _index_add_zero(nparticles, receivers, contrib)
+        # 自己寄与 m * W(0) を加えて密度の過小推定を防ぐ
+        w0 = _cubic_spline_kernel(
+            torch.zeros(1, device=rho.device, dtype=rho.dtype),
+            self._sph.smoothing_length,
+            self._dim,
+        )
+        rho = rho + self._particle_mass * w0.squeeze(0)
         return rho
+
+    def _artificial_viscosity_acc(
+        self,
+        v: torch.Tensor,
+        rho: torch.Tensor,
+        edge_index: torch.Tensor,
+        rel: torch.Tensor,
+        dist: torch.Tensor,
+    ) -> torch.Tensor:
+        """Monaghan 型人工粘性による加速度項。"""
+
+        if self._sph.alpha_viscosity == 0.0 and self._sph.beta_viscosity == 0.0:
+            return torch.zeros_like(v)
+
+        senders = edge_index[0]
+        receivers = edge_index[1]
+
+        v_rel = v[senders] - v[receivers]  # v_j - v_i
+        v_dot_r = (v_rel * rel).sum(dim=-1)
+        mask = v_dot_r < 0  # 収束しているペアのみ
+        if not mask.any():
+            return torch.zeros_like(v)
+
+        h = self._sph.smoothing_length
+        c = self._sph.sound_speed
+        mu = h * v_dot_r / (dist**2 + self._sph.visc_eps * h * h)
+        rho_ij = 0.5 * (rho[senders] + rho[receivers])
+        Pi = (-self._sph.alpha_viscosity * c * mu + self._sph.beta_viscosity * mu * mu) / (
+            rho_ij + 1e-8
+        )
+        Pi = torch.where(mask, Pi, torch.zeros_like(Pi))
+
+        grad_w = _cubic_spline_kernel_grad(rel, dist, h, self._dim)
+        acc_edges = -self._particle_mass * Pi.unsqueeze(-1) * grad_w
+        acc = _index_add_zero(v.shape[0], receivers, acc_edges)
+        return acc
 
     def _sph_potential(self, rho: torch.Tensor) -> torch.Tensor:
         u = _tait_internal_energy(
@@ -433,10 +508,11 @@ class HamiltonianSPHSimulator(BaseSimulator):
             x = x.requires_grad_(True)
             v = v.requires_grad_(True)
         else:
-            x = x.detach()
-            v = v.detach()
+            # 勾配グラフは保持しないが，力計算に必要な一次勾配は取る
+            x = x.detach().requires_grad_(True)
+            v = v.detach().requires_grad_(True)
 
-        edge_index, edge_features, _, kernel_vals = self._build_edges(
+        edge_index, edge_features, dist, kernel_vals, rel = self._build_edges(
             x, nparticles_per_example
         )
         rho = self._compute_density(edge_index, kernel_vals, x.shape[0])
@@ -455,6 +531,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
         mass = torch.as_tensor(self._particle_mass, device=x.device, dtype=x.dtype)
         xdot = dH_dv / mass
         vdot = -dH_dx / mass
+        # 非保存な人工粘性を加えて数値安定性を確保
+        vdot = vdot + self._artificial_viscosity_acc(v, rho, edge_index, rel, dist)
         return xdot, vdot, rho.detach()
 
     # ------------------------------------------------------------------
@@ -513,7 +591,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
         if was_training:
             self.eval()
         try:
-            with torch.no_grad():
+            # 予測時でも内部で力計算のための勾配が必要なので grad を有効化
+            with torch.enable_grad():
                 x_new, v_new, _, _ = self._integrate(
                     x,
                     v,
