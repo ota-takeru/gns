@@ -105,6 +105,11 @@ class SPHConfig:
     alpha_viscosity: float = 0.1
     beta_viscosity: float = 0.0
     visc_eps: float = 0.01
+    # 壁ポテンシャル関連（デフォルトでバネ状の斥力を有効化）
+    use_wall_potential: bool = True
+    wall_potential_strength: float = 50.0
+    wall_potential_width: Optional[float] = None  # None の場合は smoothing_length を利用
+    wall_potential_exponent: float = 2.0  # 2 ならバネ、>2 で硬く、1< で滑らか
 
 
 @dataclass
@@ -252,6 +257,9 @@ class HamiltonianSPHSimulator(BaseSimulator):
         if self._sph.smoothing_length is None:
             # cubic spline の有効半径 2h が connectivity_radius に一致するように設定
             self._sph.smoothing_length = self._connectivity_radius * 0.5
+        if self._sph.wall_potential_width is None:
+            # 壁近傍の有効幅はカーネル幅に揃えると滑らかになる
+            self._sph.wall_potential_width = self._sph.smoothing_length
         self._ham_cfg = _coerce(hamiltonian_net, HamiltonianNetConfig, HamiltonianNetConfig())
         self._int_cfg = _coerce(integrator, IntegratorConfig, IntegratorConfig())
 
@@ -351,7 +359,11 @@ class HamiltonianSPHSimulator(BaseSimulator):
     def _apply_boundary_conditions(
         self, x: torch.Tensor, v: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """境界を超えた粒子を反射し、速度を反転・減衰させる。"""
+        """境界処理。
+
+        - 壁ポテンシャル使用時: 位置の軽いクリップのみで滑らかな力に任せる。
+        - それ以外: 従来通りの減衰付き反射。
+        """
 
         boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
         lower = boundaries[:, 0]
@@ -361,6 +373,14 @@ class HamiltonianSPHSimulator(BaseSimulator):
         above = x > upper
         if not (below.any() or above.any()):
             return x, v
+
+        if self._sph.use_wall_potential:
+            # 壁ポテンシャルが内側へ押し戻すので、数値誤差だけ抑える軽量クリップにとどめる
+            x_clamped = torch.min(torch.max(x, lower), upper)
+            # 飛び出した分の速度は弱めて暴走を防ぐが、反射はしない
+            needs_damp = (x_clamped != x).any(dim=-1, keepdim=True)
+            v_damped = torch.where(needs_damp, 0.5 * v, v)
+            return x_clamped, v_damped
 
         x_reflected = x.clone()
         v_reflected = v.clone()
@@ -495,7 +515,33 @@ class HamiltonianSPHSimulator(BaseSimulator):
             g = self._gravity.to(x.device)
             potential_terms.append(-(mass * g * x).sum())
 
+        if self._sph.use_wall_potential:
+            potential_terms.append(self._wall_potential_energy(x))
+
         return kinetic + sum(potential_terms)
+
+    def _wall_potential_energy(self, x: torch.Tensor) -> torch.Tensor:
+        """境界近傍で滑らかに反発するポテンシャルエネルギー U_wall を返す。"""
+
+        boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
+        lower = boundaries[:, 0]
+        upper = boundaries[:, 1]
+
+        width = max(float(self._sph.wall_potential_width), 1e-6)
+        k = float(self._sph.wall_potential_strength)
+        p = float(self._sph.wall_potential_exponent)
+
+        dist_lower = x - lower  # 内側からの距離
+        dist_upper = upper - x
+
+        penetration_lower = torch.clamp(width - dist_lower, min=0.0)
+        penetration_upper = torch.clamp(width - dist_upper, min=0.0)
+
+        # k/p * d^p としておくと勾配は k * d^{p-1} になり、p=2 でバネ相当
+        energy = (k / p) * (
+            penetration_lower.pow(p) + penetration_upper.pow(p)
+        ).sum()
+        return energy
 
     def _hamiltonian_dynamics(
         self,
