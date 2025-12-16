@@ -9,8 +9,35 @@ scenario_options:
   fluid:
     dataset: ./datasets/out_fluid/dam_break_left
     rollout_dataset: valid
-method: gns
-method_options: {}
+method: hamiltonian_sph
+method_options:
+  hamiltonian_sph:
+    # SPH + Hamiltonian GNN バリアント設定（学習時と揃える）
+    sph:
+      smoothing_length: null       # null で connectivity_radius を流用
+      rest_density: 1.0
+      sound_speed: 10.0
+      gamma: 7.0
+      max_num_neighbors: 128
+    hamiltonian_net:
+      variant: varB                # varA|varB|varC
+      latent_dim: 128
+      message_passing_steps: 4
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      use_velocity_in_H: true
+      use_density_in_H: true
+      node_dropout: 0.0
+      edge_dropout: 0.0
+    integrator:
+      dt: 0.001
+      type: leapfrog               # leapfrog|symplectic_euler
+    particle_mass: 1.0
+    gravity: [0.0, -9.81, 0.0]     # 2D なら 2 要素に
+    include_external_potential: true
+    pos_feature_scale: null        # null で半径を使用
+    vel_feature_scale: 1.0
+    rho_feature_scale: null        # null で rest_density を使用
 model_path: ./models/ # 学習済みモデルの格納先
 # Kaggle で Add data を使う場合は /kaggle/input/<dataset-name>/models などに置き換える
 output_path: ./rollouts/ # 推論結果(pklなど)の出力先
