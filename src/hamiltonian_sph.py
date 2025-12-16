@@ -200,8 +200,13 @@ class HamiltonianSPHSimulator(BaseSimulator):
         self._normalization_stats = normalization_stats
         self._device = torch.device(device)
         self._particle_mass = float(particle_mass)
-        self._boundaries = torch.as_tensor(boundaries, dtype=torch.float32)
+        boundaries_arr = torch.as_tensor(boundaries, dtype=torch.float32)
+        if boundaries_arr.ndim != 2 or boundaries_arr.shape[1] != 2 or boundaries_arr.shape[0] != self._dim:
+            msg = f"Expected boundaries with shape ({self._dim}, 2); got {tuple(boundaries_arr.shape)}"
+            raise ValueError(msg)
+        self._boundaries = boundaries_arr
         self._boundary_clamp_limit = float(boundary_clamp_limit)
+        self._boundary_restitution = 0.5  # 水面と壁の衝突を想定した減衰付き反射係数
 
         def _coerce(obj, cls, fallback):
             if obj is None:
@@ -253,15 +258,12 @@ class HamiltonianSPHSimulator(BaseSimulator):
         nparticles_per_example: torch.Tensor,
         radius: float,
         *,
-        add_self_edges: bool = True,
+        add_self_edges: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        nparticles_per_example = nparticles_per_example.to("cpu")
-        batch_ids = torch.cat(
-            [
-                torch.full((int(n),), i, dtype=torch.long)
-                for i, n in enumerate(nparticles_per_example.tolist())
-            ]
-        ).to(node_position.device)
+        counts = nparticles_per_example.to(node_position.device, dtype=torch.long)
+        batch_ids = torch.repeat_interleave(
+            torch.arange(len(counts), device=node_position.device), counts
+        )
         try:
             edge_index = radius_graph(
                 node_position,
@@ -272,7 +274,7 @@ class HamiltonianSPHSimulator(BaseSimulator):
             )
             receivers = edge_index[0, :]
             senders = edge_index[1, :]
-        except ImportError:
+        except (ImportError, RuntimeError):
             receivers, senders = self._dense_radius_graph(
                 node_position, nparticles_per_example, radius, add_self_edges
             )
@@ -314,14 +316,44 @@ class HamiltonianSPHSimulator(BaseSimulator):
             senders_cat = torch.empty(0, dtype=torch.long, device=device)
         return receivers_cat, senders_cat
 
+    def _apply_boundary_conditions(
+        self, x: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """境界を超えた粒子を反射し、速度を反転・減衰させる。"""
+
+        boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
+        lower = boundaries[:, 0]
+        upper = boundaries[:, 1]
+
+        below = x < lower
+        above = x > upper
+        if not (below.any() or above.any()):
+            return x, v
+
+        x_reflected = x.clone()
+        v_reflected = v.clone()
+
+        x_reflected = torch.where(below, lower + (lower - x_reflected), x_reflected)
+        v_reflected = torch.where(
+            below, -v_reflected * self._boundary_restitution, v_reflected
+        )
+
+        x_reflected = torch.where(above, upper - (x_reflected - upper), x_reflected)
+        v_reflected = torch.where(
+            above, -v_reflected * self._boundary_restitution, v_reflected
+        )
+
+        x_reflected = torch.min(torch.max(x_reflected, lower), upper)
+        return x_reflected, v_reflected
+
     # ------------------------------------------------------------------
     # SPH 基本項
     def _build_edges(self, x: torch.Tensor, nparticles_per_example: torch.Tensor):
-        senders, receivers = self._compute_graph_connectivity(
-            x, nparticles_per_example, self._connectivity_radius
+        receivers, senders = self._compute_graph_connectivity(
+            x, nparticles_per_example, self._connectivity_radius, add_self_edges=False
         )
         rel = x[senders] - x[receivers]
-        dist = rel.norm(dim=-1, keepdim=True)
+        dist = rel.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         w = _cubic_spline_kernel(dist, self._sph.smoothing_length, self._dim)
         edge_features = torch.cat(
             [rel / self._sph.smoothing_length, dist / self._sph.smoothing_length, w],
@@ -338,8 +370,7 @@ class HamiltonianSPHSimulator(BaseSimulator):
     ) -> torch.Tensor:
         senders = edge_index[0]
         receivers = edge_index[1]
-        mass_j = torch.full_like(kernel_vals, self._particle_mass, dtype=kernel_vals.dtype)
-        contrib = mass_j * kernel_vals
+        contrib = kernel_vals * self._particle_mass
         rho = _index_add_zero(nparticles, receivers, contrib)
         return rho
 
@@ -364,8 +395,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
         edge_index: torch.Tensor,
         edge_features: torch.Tensor,
     ) -> torch.Tensor:
-        mass = torch.full((x.shape[0],), self._particle_mass, device=x.device, dtype=x.dtype)
-        p = mass.unsqueeze(-1) * v
+        mass = torch.as_tensor(self._particle_mass, device=x.device, dtype=x.dtype)
+        p = mass * v
         kinetic = 0.5 * ((p**2).sum(dim=-1) / mass).sum()
 
         potential_terms = []
@@ -385,7 +416,7 @@ class HamiltonianSPHSimulator(BaseSimulator):
 
         if self._include_external_potential and self._gravity is not None:
             g = self._gravity.to(x.device)
-            potential_terms.append(-(mass.unsqueeze(-1) * g * x).sum())
+            potential_terms.append(-(mass * g * x).sum())
 
         return kinetic + sum(potential_terms)
 
@@ -398,8 +429,12 @@ class HamiltonianSPHSimulator(BaseSimulator):
         *,
         create_graph: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x = x.requires_grad_(True)
-        v = v.requires_grad_(True)
+        if create_graph:
+            x = x.requires_grad_(True)
+            v = v.requires_grad_(True)
+        else:
+            x = x.detach()
+            v = v.detach()
 
         edge_index, edge_features, _, kernel_vals = self._build_edges(
             x, nparticles_per_example
@@ -417,35 +452,43 @@ class HamiltonianSPHSimulator(BaseSimulator):
         dH_dv, dH_dx = torch.autograd.grad(
             H, (v, x), create_graph=create_graph, retain_graph=create_graph
         )
-        mass = torch.full((x.shape[0],), self._particle_mass, device=x.device, dtype=x.dtype)
-        xdot = dH_dv / mass.unsqueeze(-1)
-        vdot = -dH_dx / mass.unsqueeze(-1)
-        if self._gravity is not None:
-            vdot = vdot + self._gravity.to(v.device)
+        mass = torch.as_tensor(self._particle_mass, device=x.device, dtype=x.dtype)
+        xdot = dH_dv / mass
+        vdot = -dH_dx / mass
         return xdot, vdot, rho.detach()
 
     # ------------------------------------------------------------------
     # 積分器
-    def _integrate(self, x: torch.Tensor, v: torch.Tensor, particle_type: torch.Tensor, nparticles: torch.Tensor):
+    def _integrate(
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        particle_type: torch.Tensor,
+        nparticles: torch.Tensor,
+        *,
+        create_graph: bool,
+    ):
         dt = self._int_cfg.dt
         if self._int_cfg.type == "symplectic_euler":
             xdot, vdot, rho = self._hamiltonian_dynamics(
-                x, v, particle_type, nparticles, create_graph=True
+                x, v, particle_type, nparticles, create_graph=create_graph
             )
             v_new = v + dt * vdot
             x_new = x + dt * v_new
+            x_new, v_new = self._apply_boundary_conditions(x_new, v_new)
             return x_new, v_new, vdot, rho
 
         # default: leapfrog
         xdot, vdot, rho = self._hamiltonian_dynamics(
-            x, v, particle_type, nparticles, create_graph=True
+            x, v, particle_type, nparticles, create_graph=create_graph
         )
         v_half = v + 0.5 * dt * vdot
         x_new = x + dt * v_half
         xdot_new, vdot_new, rho_new = self._hamiltonian_dynamics(
-            x_new, v_half, particle_type, nparticles, create_graph=True
+            x_new, v_half, particle_type, nparticles, create_graph=create_graph
         )
         v_new = v_half + 0.5 * dt * vdot_new
+        x_new, v_new = self._apply_boundary_conditions(x_new, v_new)
         # 勾配計算用に最後の vdot_new を返す
         return x_new, v_new, vdot_new, rho_new
 
@@ -461,12 +504,27 @@ class HamiltonianSPHSimulator(BaseSimulator):
         del material_property  # 現状では未使用
         x = current_positions[:, -1].to(self._device)
         prev = current_positions[:, -2].to(self._device)
-        v = x - prev
+        dt = self._int_cfg.dt
+        v = (x - prev) / dt
         particle_types = particle_types.to(self._device)
         nparticles_per_example = nparticles_per_example.to(self._device)
 
-        with torch.enable_grad():
-            x_new, v_new, _, _ = self._integrate(x, v, particle_types, nparticles_per_example)
+        was_training = self.training
+        if was_training:
+            self.eval()
+        try:
+            with torch.no_grad():
+                x_new, v_new, _, _ = self._integrate(
+                    x,
+                    v,
+                    particle_types,
+                    nparticles_per_example,
+                    create_graph=False,
+                )
+        finally:
+            if was_training:
+                self.train()
+
         return x_new.detach()
 
     def predict_accelerations(
@@ -482,22 +540,33 @@ class HamiltonianSPHSimulator(BaseSimulator):
         noisy_position_sequence = position_sequence + position_sequence_noise
         x = noisy_position_sequence[:, -1].to(self._device)
         prev = noisy_position_sequence[:, -2].to(self._device)
-        v = x - prev
+        dt = self._int_cfg.dt
+        v = (x - prev) / dt
         particle_types = particle_types.to(self._device)
         nparticles_per_example = nparticles_per_example.to(self._device)
 
-        with torch.enable_grad():
-            _, _, vdot, _ = self._integrate(x, v, particle_types, nparticles_per_example)
+        create_graph = True
+        with torch.set_grad_enabled(create_graph):
+            _, _, vdot, _ = self._integrate(
+                x,
+                v,
+                particle_types,
+                nparticles_per_example,
+                create_graph=create_graph,
+            )
 
         acc = vdot
         acc_stats = self._normalization_stats["acceleration"]
-        normalized_acc = (acc - acc_stats["mean"]) / acc_stats["std"]
+        acc_mean = torch.as_tensor(acc_stats["mean"], device=acc.device, dtype=acc.dtype)
+        acc_std = torch.as_tensor(acc_stats["std"], device=acc.device, dtype=acc.dtype)
+        normalized_acc = (acc - acc_mean) / acc_std
 
         with torch.no_grad():
             next_position_adjusted = next_positions + position_sequence_noise[:, -1]
-            target_acc = next_position_adjusted - position_sequence[:, -1]
-            target_acc = target_acc - (position_sequence[:, -1] - position_sequence[:, -2])
-            target_normalized = (target_acc - acc_stats["mean"]) / acc_stats["std"]
+            target_acc = (next_position_adjusted - position_sequence[:, -1]) / dt
+            target_acc = target_acc - (position_sequence[:, -1] - position_sequence[:, -2]) / dt
+            target_acc = target_acc / dt
+            target_normalized = (target_acc - acc_mean) / acc_std
 
         return normalized_acc, target_normalized
 

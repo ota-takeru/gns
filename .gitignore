@@ -8,6 +8,7 @@ wheels/
 out/
 rollouts/   
 models/
+models_small/
 out_fluid/      
 
 # Virtual environments
