@@ -636,7 +636,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
                 create_graph=create_graph,
             )
 
-        acc = vdot
+        # ここでは GNS と同じスケール（Δv）で損失を計算するため、物理加速度に dt を掛けてから正規化する。
+        acc = vdot * dt
         acc_stats = self._normalization_stats["acceleration"]
         acc_mean = torch.as_tensor(acc_stats["mean"], device=acc.device, dtype=acc.dtype)
         acc_std = torch.as_tensor(acc_stats["std"], device=acc.device, dtype=acc.dtype)
@@ -644,9 +645,9 @@ class HamiltonianSPHSimulator(BaseSimulator):
 
         with torch.no_grad():
             next_position_adjusted = next_positions + position_sequence_noise[:, -1]
-            target_acc = (next_position_adjusted - position_sequence[:, -1]) / dt
-            target_acc = target_acc - (position_sequence[:, -1] - position_sequence[:, -2]) / dt
-            target_acc = target_acc / dt
+            next_velocity = next_position_adjusted - position_sequence[:, -1]
+            prev_velocity = position_sequence[:, -1] - position_sequence[:, -2]
+            target_acc = next_velocity - prev_velocity  # Δv（dt で割らない）
             target_normalized = (target_acc - acc_mean) / acc_std
 
         return normalized_acc, target_normalized
