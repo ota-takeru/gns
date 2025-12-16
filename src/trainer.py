@@ -110,6 +110,9 @@ def train(cfg: Config, device: torch.device):
             ddp_kwargs["device_ids"] = [device.index]
             ddp_kwargs["output_device"] = device.index
         simulator: Any = DDP(simulator_core, **ddp_kwargs)
+        # 互換性のため、DDP ラッパーにもメソッドを生やしておく
+        simulator.predict_positions = simulator.module.predict_positions
+        simulator.predict_accelerations = simulator.module.predict_accelerations
     else:
         simulator = simulator_core
 
