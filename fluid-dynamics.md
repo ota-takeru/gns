@@ -10,9 +10,11 @@
 $$
 \frac{D\rho}{Dt} = -\rho\,(\nabla \cdot \mathbf{v}) 
 $$
-- $\nabla \cdot \mathbf{v} = \left(\frac{ \partial v_x}{\partial x} + \frac{\partial v_y}{\partial y} + \frac{\partial v_z}{\partial z}\right)$ : 体積の変化率と考えられる(空間的な速度の変化が大きいほど体積が増える)
+- $\nabla \cdot \mathbf{v} = \left(\frac{ \partial v_x}{\partial x} + \frac{\partial v_y}{\partial y} + \frac{\partial v_z}{\partial z}\right)$ : 体積の変化率と考えられる
+  $\frac{ \partial v_x}{\partial x} \approx \frac{v_x(x+\Delta \frac{\Delta x}{2}) - v_x(x-\frac{\Delta x}{2})}{\Delta x}$
+  (空間的な速度の変化が大きいほど体積が増える)
   
-つまり、密度の変化率が、流体の体積変化率(発散)に比例することを表している。
+つまり、密度の変化率が、流体の体積変化率に比例することを表している。
 
 **運動方程式（オイラー方程式）**
 
@@ -21,6 +23,7 @@ $$
 $$
 左右の面に働く圧力の差がその点での圧力になる。
 その差を体積で割ったのが圧力の勾配$\nabla p$に対応する。
+
 
 圧力は密度の関数で与えられる。
 $$
