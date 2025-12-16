@@ -87,7 +87,9 @@ def _tait_internal_energy(
 def _index_add_zero(dst_size: int, index: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     """torch_scatter 依存を避けつつ scatter_add 相当を行う。"""
 
-    out = torch.zeros(dst_size, device=src.device, dtype=src.dtype)
+    # src が (E, D) など多次元でも動くように出力形状を合わせる
+    out_shape = (dst_size, *src.shape[1:])
+    out = torch.zeros(out_shape, device=src.device, dtype=src.dtype)
     return out.index_add(0, index, src)
 
 
