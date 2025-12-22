@@ -25,8 +25,9 @@ method_options:
       message_passing_steps: 4
       mlp_layers: 2
       mlp_hidden_dim: 128
-      use_velocity_in_H: true
+      use_velocity_in_H: false
       use_density_in_H: true
+      use_sph_features: false
       node_dropout: 0.0
       edge_dropout: 0.0
     integrator:
