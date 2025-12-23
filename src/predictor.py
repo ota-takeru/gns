@@ -10,6 +10,7 @@ from rollout_utils import rollout
 from simulator_factory import _get_simulator
 from train_config import INPUT_SEQUENCE_LENGTH, Config
 from train_paths import _resolve_model_path, _resolve_output_directory
+from train_utils import _resolve_rollout_dataset_path
 
 
 def predict(cfg: Config, device: torch.device):
@@ -31,12 +32,13 @@ def predict(cfg: Config, device: torch.device):
 
     output_dir = _resolve_output_directory(cfg)
 
-    valid_npz = Path(cfg.data_path) / "valid.npz"
-    split = "test" if (cfg.mode == "rollout" or (not valid_npz.exists())) else "valid"
+    dataset_path = _resolve_rollout_dataset_path(cfg)
+    if dataset_path is None:
+        raise FileNotFoundError(
+            "No suitable dataset found for rollout/valid. Expected one of valid.npz, test.npz, or train.npz under the configured data_path, or a path specified via rollout_dataset."
+        )
 
-    ds = data_loader.get_data_loader_by_trajectories(
-        path=Path(cfg.data_path) / f"{split}.npz"
-    )
+    ds = data_loader.get_data_loader_by_trajectories(dataset_path)
 
     first = ds.dataset[0]
     if len(first) == 4:
@@ -88,11 +90,12 @@ def predict(cfg: Config, device: torch.device):
                 device,
             )
             example_rollout["metadata"] = metadata
-            print(f"Predicting example {example_i} loss: {loss.mean()}")
+            loss_mean = float(loss.mean().detach().cpu())
+            print(f"Predicting example {example_i} loss: {loss_mean:.6f}")
             eval_loss.append(torch.flatten(loss))
 
             if cfg.mode == "rollout":
-                example_rollout["loss"] = loss.mean()
+                example_rollout["loss"] = loss_mean
                 filename = f"{cfg.output_filename}_ex{example_i}.pkl"
                 with (output_dir / filename).open("wb") as f:
                     pickle.dump(example_rollout, f)
