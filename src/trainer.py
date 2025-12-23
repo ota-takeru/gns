@@ -129,10 +129,9 @@ def train(cfg: Config, device: torch.device):
 
     amp_enabled = bool(cfg.amp_enable and device.type == "cuda")
     amp_dtype = _resolve_amp_dtype(cfg.amp_dtype) if amp_enabled else torch.float32
-    if _AMP_GRADSCALER_SUPPORTS_DEVICE_TYPE:
-        scaler = GradScaler(device_type=device.type, enabled=amp_enabled)
-    else:
-        scaler = GradScaler(enabled=amp_enabled)
+    # device_type 引数付きの GradScaler は一部バージョンで初回 step で
+    # "No inf checks were recorded" を誤検知することがあるため、従来 API に統一する。
+    scaler = GradScaler(enabled=amp_enabled)
 
     log_interval = max(1, int(cfg.log_interval))
     tensorboard_interval = (
