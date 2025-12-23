@@ -84,7 +84,9 @@ def _tait_internal_energy(
     return B / (gamma - 1.0) * (torch.pow(exponent, gamma - 1.0) - 1.0)
 
 
-def _index_add_zero(dst_size: int, index: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+def _index_add_zero(
+    dst_size: int, index: torch.Tensor, src: torch.Tensor
+) -> torch.Tensor:
     """torch_scatter 依存を避けつつ scatter_add 相当を行う。"""
 
     # src が (E, D) など多次元でも動くように出力形状を合わせる
@@ -105,10 +107,13 @@ class SPHConfig:
     alpha_viscosity: float = 0.1
     beta_viscosity: float = 0.0
     visc_eps: float = 0.01
+    enable_artificial_viscosity: bool = False
     # 壁ポテンシャル関連（デフォルトでバネ状の斥力を有効化）
     use_wall_potential: bool = True
     wall_potential_strength: float = 50.0
-    wall_potential_width: Optional[float] = None  # None の場合は smoothing_length を利用
+    wall_potential_width: Optional[float] = (
+        None  # None の場合は smoothing_length を利用
+    )
     wall_potential_exponent: float = 2.0  # 2 ならバネ、>2 で硬く、1< で滑らか
 
 
@@ -119,9 +124,13 @@ class HamiltonianNetConfig:
     message_passing_steps: int = 4
     mlp_layers: int = 2
     mlp_hidden_dim: int = 128
-    # 速度依存項をハミルトニアンに入れると正準形から外れるためデフォルトでオフ
+    # 速度依存項をハミルトニアンに入れると正準形から外れるためデフォルトでオフ。
+    # 保存系としての xdot=dH/dp を崩さないため、常に False を前提に扱う。
     use_velocity_in_H: bool = False
     use_density_in_H: bool = True
+    # SPH 由来の特徴量（W_ij など）を保存枝に入れるかどうか。
+    # Mode A: False（距離と質量・タイプのみ）、Mode B: True（SPH特徴を追加）
+    use_sph_features: bool = False
     node_dropout: float = 0.0
     edge_dropout: float = 0.0
 
@@ -133,7 +142,10 @@ class IntegratorConfig:
 
 
 class HamiltonianPotentialNet(nn.Module):
-    """ポテンシャル補正 ΔU を出力する小型 GNN."""
+    """保存力ブランチ用のペアポテンシャルネットワーク。
+
+    回転・並進不変性を保つため、距離などのスカラー量だけを入力に使う。
+    """
 
     def __init__(
         self,
@@ -142,59 +154,72 @@ class HamiltonianPotentialNet(nn.Module):
         type_emb_dim: int,
         net_cfg: HamiltonianNetConfig,
         pos_scale: float,
-        vel_scale: float,
         rho_scale: float,
+        particle_mass: float,
     ) -> None:
         super().__init__()
-        self._dim = dim
         self._pos_scale = pos_scale
-        self._vel_scale = vel_scale
         self._rho_scale = rho_scale
         self._cfg = net_cfg
+        self._particle_mass = float(particle_mass)
         self._type_emb = nn.Embedding(nparticle_types, type_emb_dim)
 
-        node_in = dim  # 位置
-        if net_cfg.use_velocity_in_H:
-            node_in += dim
+        # 回転・並進不変性を保つため、方向ベクトルは使わず距離等のスカラーのみで構成する。
+        mlp_in = 1  # 距離
+        if net_cfg.use_sph_features:
+            # W_ij を追加（dist に依存するスカラー）
+            mlp_in += 1
         if net_cfg.use_density_in_H:
-            node_in += 1
-        node_in += type_emb_dim
+            mlp_in += 2  # rho_i, rho_j
+        mlp_in += 2  # m_i, m_j（同一質量でも明示的に持たせる）
+        mlp_in += 2 * type_emb_dim  # type_i, type_j（組み合わせ判別用）
 
-        edge_in = dim + 2  # 相対位置(dim) + 距離 + kernel 値
-
-        self._gnn = graph_network.EncodeProcessDecode(
-            nnode_in_features=node_in,
-            nnode_out_features=1,  # Δu_i
-            nedge_in_features=edge_in,
-            latent_dim=net_cfg.latent_dim,
-            nmessage_passing_steps=net_cfg.message_passing_steps,
-            nmlp_layers=net_cfg.mlp_layers,
-            mlp_hidden_dim=net_cfg.mlp_hidden_dim,
+        self._mlp = graph_network.build_mlp(
+            input_size=mlp_in,
+            hidden_layer_sizes=[
+                net_cfg.mlp_hidden_dim for _ in range(net_cfg.mlp_layers)
+            ],
+            output_size=1,
+            activation=nn.SiLU,
+            output_activation=nn.Identity,
         )
 
         self._node_dropout = nn.Dropout(net_cfg.node_dropout)
-        self._edge_dropout = nn.Dropout(net_cfg.edge_dropout)
 
     def forward(
         self,
-        x: torch.Tensor,
-        v: torch.Tensor,
-        rho: torch.Tensor,
-        particle_type: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_features: torch.Tensor,
+        dist: torch.Tensor,
+        kernel: torch.Tensor,
+        rho_i: torch.Tensor | None,
+        rho_j: torch.Tensor | None,
+        particle_type_i: torch.Tensor,
+        particle_type_j: torch.Tensor,
     ) -> torch.Tensor:
-        feats = [x / self._pos_scale]
-        if self._cfg.use_velocity_in_H:
-            feats.append(v / self._vel_scale)
-        if self._cfg.use_density_in_H:
-            feats.append(rho.unsqueeze(-1) / self._rho_scale)
-        feats.append(self._type_emb(particle_type))
+        feats = [dist.unsqueeze(-1) / self._pos_scale]
 
-        node_feat = torch.cat(feats, dim=-1)
-        node_feat = self._node_dropout(node_feat)
-        edge_feat = self._edge_dropout(edge_features)
-        return self._gnn(node_feat, edge_index, edge_feat)
+        if self._cfg.use_sph_features:
+            feats.append(kernel.unsqueeze(-1))
+
+        if self._cfg.use_density_in_H and rho_i is not None and rho_j is not None:
+            feats.extend(
+                [
+                    rho_i.unsqueeze(-1) / self._rho_scale,
+                    rho_j.unsqueeze(-1) / self._rho_scale,
+                ]
+            )
+
+        mass_feat = torch.full(
+            (dist.shape[0], 2),
+            self._particle_mass,
+            device=dist.device,
+            dtype=dist.dtype,
+        )
+        feats.append(mass_feat)
+        feats.extend([self._type_emb(particle_type_i), self._type_emb(particle_type_j)])
+
+        pair_features = torch.cat(feats, dim=-1)
+        pair_features = self._node_dropout(pair_features)
+        return self._mlp(pair_features).squeeze(-1)
 
 
 class HamiltonianSPHSimulator(BaseSimulator):
@@ -237,7 +262,11 @@ class HamiltonianSPHSimulator(BaseSimulator):
         self._device = torch.device(device)
         self._particle_mass = float(particle_mass)
         boundaries_arr = torch.as_tensor(boundaries, dtype=torch.float32)
-        if boundaries_arr.ndim != 2 or boundaries_arr.shape[1] != 2 or boundaries_arr.shape[0] != self._dim:
+        if (
+            boundaries_arr.ndim != 2
+            or boundaries_arr.shape[1] != 2
+            or boundaries_arr.shape[0] != self._dim
+        ):
             msg = f"Expected boundaries with shape ({self._dim}, 2); got {tuple(boundaries_arr.shape)}"
             raise ValueError(msg)
         self._boundaries = boundaries_arr
@@ -260,12 +289,20 @@ class HamiltonianSPHSimulator(BaseSimulator):
         if self._sph.wall_potential_width is None:
             # 壁近傍の有効幅はカーネル幅に揃えると滑らかになる
             self._sph.wall_potential_width = self._sph.smoothing_length
-        self._ham_cfg = _coerce(hamiltonian_net, HamiltonianNetConfig, HamiltonianNetConfig())
+        self._ham_cfg = _coerce(
+            hamiltonian_net, HamiltonianNetConfig, HamiltonianNetConfig()
+        )
         self._int_cfg = _coerce(integrator, IntegratorConfig, IntegratorConfig())
 
         pos_scale = pos_feature_scale or self._connectivity_radius
-        vel_scale = vel_feature_scale or 1.0
         rho_scale = rho_feature_scale or max(self._sph.rest_density, 1.0)
+
+        # 保存系を崩さないよう、速度をハミルトニアンのポテンシャル項へ入れる設定は強制的に無効化する。
+        if self._ham_cfg.use_velocity_in_H:
+            print(
+                "[hamiltonian_sph] use_velocity_in_H=True は保存系を壊すため False に強制します。"
+            )
+            self._ham_cfg.use_velocity_in_H = False
 
         self._potential_net = HamiltonianPotentialNet(
             dim=self._dim,
@@ -273,8 +310,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
             type_emb_dim=particle_type_embedding_size,
             net_cfg=self._ham_cfg,
             pos_scale=pos_scale,
-            vel_scale=vel_scale,
             rho_scale=rho_scale,
+            particle_mass=self._particle_mass,
         ).to(self._device)
 
         if gravity is not None:
@@ -284,7 +321,9 @@ class HamiltonianSPHSimulator(BaseSimulator):
             elif g.numel() == 1:
                 g = g.repeat(self._dim)
             else:
-                raise ValueError("gravity の次元が粒子次元と合いません。例: 2Dなら2要素。")
+                raise ValueError(
+                    "gravity の次元が粒子次元と合いません。例: 2Dなら2要素。"
+                )
             self._gravity = g
         else:
             self._gravity = None
@@ -416,6 +455,35 @@ class HamiltonianSPHSimulator(BaseSimulator):
         edge_index = torch.stack([senders, receivers])
         return edge_index, edge_features, dist.squeeze(-1), w.squeeze(-1), rel
 
+    def _build_pair_features(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        rho: torch.Tensor | None,
+    ):
+        """エッジ集合から無向ペア {i,j}（i<j）を生成し、保存枝用の相対特徴を返す。"""
+
+        senders = edge_index[0]
+        receivers = edge_index[1]
+        if senders.numel() == 0:
+            return None
+
+        pair_min = torch.minimum(senders, receivers)
+        pair_max = torch.maximum(senders, receivers)
+        unique_pairs = torch.unique(torch.stack([pair_min, pair_max], dim=1), dim=0)
+        i_idx = unique_pairs[:, 0]
+        j_idx = unique_pairs[:, 1]
+
+        rel = x[j_idx] - x[i_idx]
+        dist = rel.norm(dim=-1).clamp_min(1e-6)
+        h = self._sph.smoothing_length
+        kernel = _cubic_spline_kernel(dist.unsqueeze(-1), h, self._dim).squeeze(-1)
+
+        rho_i = rho[i_idx] if rho is not None else None
+        rho_j = rho[j_idx] if rho is not None else None
+
+        return i_idx, j_idx, dist, kernel, rho_i, rho_j
+
     def _compute_density(
         self,
         edge_index: torch.Tensor,
@@ -445,7 +513,9 @@ class HamiltonianSPHSimulator(BaseSimulator):
     ) -> torch.Tensor:
         """Monaghan 型人工粘性による加速度項。"""
 
-        if self._sph.alpha_viscosity == 0.0 and self._sph.beta_viscosity == 0.0:
+        if not self._sph.enable_artificial_viscosity or (
+            self._sph.alpha_viscosity == 0.0 and self._sph.beta_viscosity == 0.0
+        ):
             return torch.zeros_like(v)
 
         senders = edge_index[0]
@@ -461,9 +531,9 @@ class HamiltonianSPHSimulator(BaseSimulator):
         c = self._sph.sound_speed
         mu = h * v_dot_r / (dist**2 + self._sph.visc_eps * h * h)
         rho_ij = 0.5 * (rho[senders] + rho[receivers])
-        Pi = (-self._sph.alpha_viscosity * c * mu + self._sph.beta_viscosity * mu * mu) / (
-            rho_ij + 1e-8
-        )
+        Pi = (
+            -self._sph.alpha_viscosity * c * mu + self._sph.beta_viscosity * mu * mu
+        ) / (rho_ij + 1e-8)
         Pi = torch.where(mask, Pi, torch.zeros_like(Pi))
 
         grad_w = _cubic_spline_kernel_grad(rel, dist, h, self._dim)
@@ -479,7 +549,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
             gamma=self._sph.gamma,
         )
         mass = torch.full_like(rho, self._particle_mass, dtype=rho.dtype)
-        return (mass * u).sum()
+        n = max(float(rho.numel()), 1.0)
+        return (mass * u).sum() / n
 
     # ------------------------------------------------------------------
     # ハミルトニアンとその勾配
@@ -490,35 +561,79 @@ class HamiltonianSPHSimulator(BaseSimulator):
         rho: torch.Tensor,
         particle_type: torch.Tensor,
         edge_index: torch.Tensor,
-        edge_features: torch.Tensor,
     ) -> torch.Tensor:
         mass = torch.as_tensor(self._particle_mass, device=x.device, dtype=x.dtype)
         p = mass * v
         kinetic = 0.5 * ((p**2).sum(dim=-1) / mass).sum()
+        return kinetic + self._potential_energy(x, rho, particle_type, edge_index)
 
+    def _potential_energy(
+        self,
+        x: torch.Tensor,
+        rho: torch.Tensor,
+        particle_type: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """ポテンシャル項のみを集約したスカラー U。"""
+
+        n_particles = max(float(x.shape[0]), 1.0)
         potential_terms = []
         if self._ham_cfg.variant in {"varB", "varC"}:
             potential_terms.append(self._sph_potential(rho))
 
-        delta_u = self._potential_net(
-            x=x,
-            v=v,
-            rho=rho,
-            particle_type=particle_type,
-            edge_index=edge_index,
-            edge_features=edge_features,
-        )
         if self._ham_cfg.variant in {"varA", "varB", "varC"}:
-            potential_terms.append((mass * delta_u.squeeze(-1)).sum())
+            conservative_u = self._conservative_potential(
+                x=x,
+                rho=rho,
+                particle_type=particle_type,
+                edge_index=edge_index,
+            )
+            potential_terms.append(conservative_u)
 
         if self._include_external_potential and self._gravity is not None:
+            mass = torch.as_tensor(self._particle_mass, device=x.device, dtype=x.dtype)
             g = self._gravity.to(x.device)
-            potential_terms.append(-(mass * g * x).sum())
+            potential_terms.append(-(mass * g * x).sum() / n_particles)
 
         if self._sph.use_wall_potential:
             potential_terms.append(self._wall_potential_energy(x))
 
-        return kinetic + sum(potential_terms)
+        if not potential_terms:
+            return torch.zeros((), device=x.device, dtype=x.dtype)
+        return sum(potential_terms)
+
+    def _conservative_potential(
+        self,
+        x: torch.Tensor,
+        rho: torch.Tensor,
+        particle_type: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """無向ペアごとに一度だけ U_pair を積算する保存力ブランチ."""
+
+        pair_features = self._build_pair_features(x, edge_index, rho)
+        if pair_features is None:
+            return torch.zeros((), device=x.device, dtype=x.dtype)
+
+        (
+            i_idx,
+            j_idx,
+            dist,
+            kernel,
+            rho_i,
+            rho_j,
+        ) = pair_features
+
+        u_pair = self._potential_net(
+            dist=dist,
+            kernel=kernel,
+            rho_i=rho_i,
+            rho_j=rho_j,
+            particle_type_i=particle_type[i_idx],
+            particle_type_j=particle_type[j_idx],
+        )
+        # 解像度外挿に耐えるよう、ペア数で正規化する（平均）。
+        return u_pair.mean()
 
     def _wall_potential_energy(self, x: torch.Tensor) -> torch.Tensor:
         """境界近傍で滑らかに反発するポテンシャルエネルギー U_wall を返す。"""
@@ -538,9 +653,10 @@ class HamiltonianSPHSimulator(BaseSimulator):
         penetration_upper = torch.clamp(width - dist_upper, min=0.0)
 
         # k/p * d^p としておくと勾配は k * d^{p-1} になり、p=2 でバネ相当
-        energy = (k / p) * (
-            penetration_lower.pow(p) + penetration_upper.pow(p)
-        ).sum()
+        n = max(float(x.shape[0]), 1.0)
+        energy = (
+            (k / p) * (penetration_lower.pow(p) + penetration_upper.pow(p)).sum() / n
+        )
         return energy
 
     def _hamiltonian_dynamics(
@@ -552,33 +668,39 @@ class HamiltonianSPHSimulator(BaseSimulator):
         *,
         create_graph: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if create_graph:
-            x = x.requires_grad_(True)
-            v = v.requires_grad_(True)
-        else:
-            # 勾配グラフは保持しないが，力計算に必要な一次勾配は取る
-            x = x.detach().requires_grad_(True)
-            v = v.detach().requires_grad_(True)
+        x = x.detach().requires_grad_(True)
+        v = v.detach()
 
-        edge_index, edge_features, dist, kernel_vals, rel = self._build_edges(
+        # 近傍集合は各 forward で固定とみなし、離散的な出入りに対する勾配は追わない。
+        edge_index, _edge_features, dist, kernel_vals, rel = self._build_edges(
             x, nparticles_per_example
         )
         rho = self._compute_density(edge_index, kernel_vals, x.shape[0])
 
-        H = self._hamiltonian(
+        potential = self._potential_energy(
             x=x,
-            v=v,
             rho=rho,
             particle_type=particle_type,
             edge_index=edge_index,
-            edge_features=edge_features,
         )
-        dH_dv, dH_dx = torch.autograd.grad(
-            H, (v, x), create_graph=create_graph, retain_graph=create_graph
+        allow_unused = not create_graph
+        dU_dx = torch.autograd.grad(
+            potential,
+            x,
+            create_graph=create_graph,
+            retain_graph=create_graph,
+            allow_unused=allow_unused,
         )
+        if isinstance(dU_dx, tuple):
+            dU_dx = dU_dx[0]
+        if dU_dx is None:
+            if create_graph:
+                raise RuntimeError("dU/dx is None (計算グラフが切断されている可能性)")
+            dU_dx = torch.zeros_like(x)
+
         mass = torch.as_tensor(self._particle_mass, device=x.device, dtype=x.dtype)
-        xdot = dH_dv / mass
-        vdot = -dH_dx / mass
+        xdot = v
+        vdot = -dU_dx / mass
         # 非保存な人工粘性を加えて数値安定性を確保
         vdot = vdot + self._artificial_viscosity_acc(v, rho, edge_index, rel, dist)
         return xdot, vdot, rho.detach()
@@ -685,7 +807,9 @@ class HamiltonianSPHSimulator(BaseSimulator):
         # ここでは GNS と同じスケール（Δv）で損失を計算するため、物理加速度に dt を掛けてから正規化する。
         acc = vdot * dt
         acc_stats = self._normalization_stats["acceleration"]
-        acc_mean = torch.as_tensor(acc_stats["mean"], device=acc.device, dtype=acc.dtype)
+        acc_mean = torch.as_tensor(
+            acc_stats["mean"], device=acc.device, dtype=acc.dtype
+        )
         acc_std = torch.as_tensor(acc_stats["std"], device=acc.device, dtype=acc.dtype)
         normalized_acc = (acc - acc_mean) / acc_std
 
