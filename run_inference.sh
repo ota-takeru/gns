@@ -10,11 +10,11 @@ echo ""
 
 # 1. 推論を実行
 echo "1. 推論を実行中..."
-uv run python src/train.py --config config_rollout.yaml
+python src/train.py --config config_rollout.yaml
 
 echo ""
 echo "2. 結果を分析中..."
-uv run python analyze_rollouts.py
+python analyze_rollouts.py
 
 echo ""
 echo "3. 結果を可視化中..."
@@ -22,7 +22,7 @@ find rollouts -type f -name "rollout_ex*.pkl" | sort | while read -r pkl_file; d
     base_name=$(basename "$pkl_file" .pkl)
     html_file="$(dirname "$pkl_file")/${base_name}.html"
     echo "  - $pkl_file -> $html_file"
-    uv run python visualize_rollout.py "$pkl_file" --output "$html_file" --html
+    python visualize_rollout.py "$pkl_file" --output "$html_file" --html
 done
 
 echo ""
