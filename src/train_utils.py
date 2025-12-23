@@ -14,10 +14,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from learned_simulator import BaseSimulator
 from train_config import Config
 
-try:
-    from tensorboard import program as tensorboard_program
-except ImportError:  # pragma: no cover - optional dependency
-    tensorboard_program = None
+# TensorBoard はオプション依存。ここでは遅延 import にして、
+# cfg.tensorboard_enable=False の場合に ImportError ログが出ないようにする。
+tensorboard_program: Any | None = None
 
 try:  # Prefer the new torch.amp API when available to avoid deprecation warnings.
     from torch.amp import autocast, GradScaler  # type: ignore[attr-defined]
@@ -222,6 +221,13 @@ def _set_seed(seed: int) -> None:
 def _launch_tensorboard(
     log_dir: Path, host: str | None, port: int | None
 ) -> tuple[Any | None, str | None]:
+    global tensorboard_program
+    # 必要になった時だけ import する（tensorboard が未インストールでも静かにスキップ）
+    if tensorboard_program is None:
+        try:
+            from tensorboard import program as tensorboard_program  # type: ignore
+        except ImportError:  # pragma: no cover - optional dependency
+            return None, None
     if tensorboard_program is None:
         return None, None
     tb = tensorboard_program.TensorBoard()
