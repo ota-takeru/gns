@@ -142,7 +142,7 @@ def train(cfg: Config, device: torch.device):
     tb_writer: SummaryWriter | None = None
     tb_server: Any | None = None
     tb_url: str | None = None
-    if is_main_process:
+    if is_main_process and cfg.tensorboard_enable:
         tb_log_base = (
             Path(cfg.tensorboard_log_dir)
             if cfg.tensorboard_log_dir is not None

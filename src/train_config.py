@@ -43,6 +43,7 @@ class Config:
     valid_dataset_fraction: float | None = None
     train_dataset_count: int | None = None
     valid_dataset_count: int | None = None
+    tensorboard_enable: bool = False
     tensorboard_interval: int | None = None
 
     lr_init: float = 1e-4

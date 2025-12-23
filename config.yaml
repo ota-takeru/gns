@@ -58,6 +58,7 @@ train_dataset_fraction: null # 0-1 で学習データを間引く(nullで全量)
 valid_dataset_fraction: null # 0-1 で検証データを間引く(nullで全量)
 train_dataset_count: null # 学習データの使用件数を直接指定(nullで制限なし)
 valid_dataset_count: null # 検証データの使用件数を直接指定(nullで制限なし)
+tensorboard_enable: false # TensorBoard ロギングを有効化するか（デフォルト無効）
 tensorboard_log_dir: null # null の場合は model_path/tb
 log_interval: 500 # 学習ログを出力するステップ間隔
 tensorboard_interval: 100 # TensorBoard に書き込むステップ間隔（null で log_interval と同じ）

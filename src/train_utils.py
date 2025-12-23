@@ -118,6 +118,7 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "valid_dataset_fraction": cfg.valid_dataset_fraction,
         "train_dataset_count": cfg.train_dataset_count,
         "valid_dataset_count": cfg.valid_dataset_count,
+        "tensorboard_enable": cfg.tensorboard_enable,
         "tensorboard_interval": cfg.tensorboard_interval,
         "lr_init": cfg.lr_init,
         "lr_decay": cfg.lr_decay,

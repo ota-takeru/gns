@@ -27,6 +27,7 @@ train_dataset_fraction: null
 valid_dataset_fraction: null
 train_dataset_count: null
 valid_dataset_count: null
+tensorboard_enable: false
 tensorboard_log_dir: null
 log_interval: 1
 tensorboard_interval: null

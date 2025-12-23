@@ -22,6 +22,7 @@ train_dataset_fraction: 0.5
 valid_dataset_fraction: 0.5
 train_dataset_count: null
 valid_dataset_count: null
+tensorboard_enable: true
 tensorboard_log_dir: ./models/test_run/tb
 tensorboard_interval: 10
 tensorboard_port: 6006
