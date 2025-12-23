@@ -1,12 +1,11 @@
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.tensorboard import SummaryWriter
 
 import data_loader
 import noise_utils
@@ -35,6 +34,9 @@ from train_utils import (
     optimizer_to,
     save_model_and_train_state,
 )
+
+if TYPE_CHECKING:  # type hints only; no runtime dependency when disabled
+    from torch.utils.tensorboard import SummaryWriter
 
 
 def train(cfg: Config, device: torch.device):
@@ -139,10 +141,12 @@ def train(cfg: Config, device: torch.device):
         else log_interval
     )
 
-    tb_writer: SummaryWriter | None = None
+    tb_writer: "SummaryWriter | None" = None  # type: ignore[name-defined]
     tb_server: Any | None = None
     tb_url: str | None = None
     if is_main_process and cfg.tensorboard_enable:
+        # 遅延インポートで、無効化時に依存パッケージを要求しない
+        from torch.utils.tensorboard import SummaryWriter  # type: ignore
         tb_log_base = (
             Path(cfg.tensorboard_log_dir)
             if cfg.tensorboard_log_dir is not None
