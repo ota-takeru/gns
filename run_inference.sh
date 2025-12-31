@@ -19,10 +19,10 @@ python analyze_rollouts.py
 echo ""
 echo "3. 結果を可視化中..."
 find rollouts -type f -name "rollout_ex*.pkl" | sort | while read -r pkl_file; do
-    base_name=$(basename "$pkl_file" .pkl)
-    html_file="$(dirname "$pkl_file")/${base_name}.html"
-    echo "  - $pkl_file -> $html_file"
-    python visualize_rollout.py "$pkl_file" --output "$html_file" --html
+    # visualize_rollout.py は --output 未指定なら <入力ファイル名>.<拡張子> で保存してくれる
+    # ので、ここではフォーマットだけ指定すれば OK
+    echo "  - $pkl_file -> ${pkl_file%.pkl}.html"
+    python visualize_rollout.py "$pkl_file" --html
 done
 
 echo ""

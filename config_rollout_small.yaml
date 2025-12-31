@@ -1,7 +1,12 @@
 mode: rollout
 data_path: ./datasets/out_fluid/dam_break_left
 scenario: fluid
-scenario_options: {}
+scenario_options:
+  rigid:
+    dataset: ./datasets/out
+  fluid:
+    dataset: ./datasets/out_fluid/dam_break_left
+    rollout_dataset: valid
 
 method: hamiltonian_sph
 method_options:

@@ -1,7 +1,14 @@
 mode: train
 data_path: ./datasets/out_fluid/dam_break_left
 scenario: fluid
-scenario_options: {}
+scenario_options:
+  rigid:
+    dataset: ./datasets/out
+    description: Default planar rigid-body scenes
+  fluid:
+    dataset: ./datasets/out_fluid/dam_break_left
+    rollout_dataset: valid
+    description: PySPH-based dam break fluid dataset
 method: hamiltonian_sph
 method_options:
   hamiltonian_sph:
