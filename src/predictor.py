@@ -13,6 +13,24 @@ from train_paths import _resolve_model_path, _resolve_output_directory
 from train_utils import _resolve_rollout_dataset_path
 
 
+def _assert_model_finite(simulator: torch.nn.Module) -> None:
+    """NaN/Inf を含む重み・バッファを検知して早期に失敗させる"""
+    bad: list[str] = []
+    for name, param in simulator.named_parameters():
+        if param is None or not param.is_floating_point():
+            continue
+        if not torch.isfinite(param).all():
+            bad.append(name)
+    for name, buf in simulator.named_buffers():
+        if buf is None or not buf.is_floating_point():
+            continue
+        if not torch.isfinite(buf).all():
+            bad.append(f"[buffer]{name}")
+    if bad:
+        joined = ", ".join(bad)
+        raise RuntimeError(f"Model contains NaN/Inf tensors: {joined}")
+
+
 def predict(cfg: Config, device: torch.device):
     """valid / rollout モードの入口"""
     metadata_key = (
@@ -27,6 +45,7 @@ def predict(cfg: Config, device: torch.device):
     if not Path(model_path).exists():
         raise FileNotFoundError(f"Model does not exist at {model_path}")
     simulator.load(model_path)
+    _assert_model_finite(simulator)
     simulator.to(device)
     simulator.eval()
 

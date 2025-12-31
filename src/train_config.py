@@ -62,7 +62,7 @@ class Config:
     ddp_backend: str = "nccl"
     ddp_timeout_sec: int = 1800
     ddp_find_unused_parameters: bool = False
-    amp_enable: bool = True
+    amp_enable: bool = False
     amp_dtype: str = "float16"
     gradient_accumulation_steps: int = 1
     num_workers: int = 4

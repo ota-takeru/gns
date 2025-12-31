@@ -39,6 +39,24 @@ if TYPE_CHECKING:  # type hints only; no runtime dependency when disabled
     from torch.utils.tensorboard import SummaryWriter
 
 
+def _assert_model_finite(module: torch.nn.Module) -> None:
+    """NaN/Inf を含む重み・バッファを検知して早期に停止する"""
+    bad: list[str] = []
+    for name, param in module.named_parameters():
+        if param is None or not param.is_floating_point():
+            continue
+        if not torch.isfinite(param).all():
+            bad.append(name)
+    for name, buf in module.named_buffers():
+        if buf is None or not buf.is_floating_point():
+            continue
+        if not torch.isfinite(buf).all():
+            bad.append(f"[buffer]{name}")
+    if bad:
+        joined = ", ".join(bad)
+        raise RuntimeError(f"Model contains NaN/Inf tensors: {joined}")
+
+
 def train(cfg: Config, device: torch.device):
     distributed = cfg.world_size > 1
     is_main_process = cfg.rank == 0
@@ -94,6 +112,7 @@ def train(cfg: Config, device: torch.device):
             if is_main_process:
                 print(f"Resume from: {model_path}, {train_state_path}")
             simulator_core.load(model_path)
+            _assert_model_finite(simulator_core)
             resume_state = torch.load(train_state_path, map_location=device)
             step = int(resume_state["global_train_state"]["step"])
             epoch = int(resume_state["global_train_state"]["epoch"])
@@ -115,8 +134,8 @@ def train(cfg: Config, device: torch.device):
         # 互換性のため、DDP ラッパーにもメソッドを生やしておく
         simulator.predict_positions = simulator.module.predict_positions
         simulator.predict_accelerations = simulator.module.predict_accelerations
-    else:
-        simulator = simulator_core
+            else:
+                simulator = simulator_core
 
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
     if resume_state is not None:
@@ -318,6 +337,8 @@ def train(cfg: Config, device: torch.device):
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+        # 更新後に NaN/Inf を早期検知
+        _assert_model_finite(simulator)
 
         mean_loss = micro_loss_accum / max(1, micro_batch_count)
         train_loss = float(mean_loss)
