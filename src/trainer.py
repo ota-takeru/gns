@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -21,9 +21,8 @@ from train_config import (
 from train_paths import _resolve_model_path
 from train_utils import (
     _AMP_AUTOCAST_SUPPORTS_DEVICE_TYPE,
-    _AMP_GRADSCALER_SUPPORTS_DEVICE_TYPE,
-    _cleanup_distributed,
     GradScaler,
+    _cleanup_distributed,
     _compute_grad_norm,
     _format_eta,
     _launch_tensorboard,
@@ -67,9 +66,7 @@ def train(cfg: Config, device: torch.device):
 
     _set_seed(cfg.seed + cfg.rank)
 
-    metadata_key = (
-        cfg.active_scenario.metadata_split if cfg.active_scenario else "train"
-    )
+    metadata_key = cfg.active_scenario.metadata_split if cfg.active_scenario else "train"
     metadata = reading_utils.read_metadata(cfg.data_path, metadata_key)
 
     simulator_core = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device, cfg)
@@ -104,11 +101,7 @@ def train(cfg: Config, device: torch.device):
             if candidate.exists():
                 train_state_path = candidate
 
-        if (
-            Path(model_path).exists()
-            and train_state_path
-            and Path(train_state_path).exists()
-        ):
+        if Path(model_path).exists() and train_state_path and Path(train_state_path).exists():
             if is_main_process:
                 print(f"Resume from: {model_path}, {train_state_path}")
             simulator_core.load(model_path)
@@ -118,9 +111,8 @@ def train(cfg: Config, device: torch.device):
             epoch = int(resume_state["global_train_state"]["epoch"])
             train_loss_hist = list(resume_state["loss_history"]["train"])
             valid_loss_hist = list(resume_state["loss_history"]["valid"])
-        else:
-            if is_main_process:
-                print("Resume files not fully found; starting fresh.")
+        elif is_main_process:
+            print("Resume files not fully found; starting fresh.")
 
     if distributed:
         ddp_kwargs: dict[str, Any] = {
@@ -130,12 +122,12 @@ def train(cfg: Config, device: torch.device):
         if device.type == "cuda":
             ddp_kwargs["device_ids"] = [device.index]
             ddp_kwargs["output_device"] = device.index
-        simulator: Any = DDP(simulator_core, **ddp_kwargs)
-        # 互換性のため、DDP ラッパーにもメソッドを生やしておく
-        simulator.predict_positions = simulator.module.predict_positions
-        simulator.predict_accelerations = simulator.module.predict_accelerations
-            else:
-                simulator = simulator_core
+            simulator: Any = DDP(simulator_core, **ddp_kwargs)
+            # 互換性のため、DDP ラッパーにもメソッドを生やしておく
+            simulator.predict_positions = simulator.module.predict_positions
+            simulator.predict_accelerations = simulator.module.predict_accelerations
+        else:
+            simulator = simulator_core
 
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
     if resume_state is not None:
@@ -159,12 +151,13 @@ def train(cfg: Config, device: torch.device):
         else log_interval
     )
 
-    tb_writer: "SummaryWriter | None" = None  # type: ignore[name-defined]
+    tb_writer: SummaryWriter | None = None  # type: ignore[name-defined]
     tb_server: Any | None = None
     tb_url: str | None = None
     if is_main_process and cfg.tensorboard_enable:
         # 遅延インポートで、無効化時に依存パッケージを要求しない
         from torch.utils.tensorboard import SummaryWriter  # type: ignore
+
         tb_log_base = (
             Path(cfg.tensorboard_log_dir)
             if cfg.tensorboard_log_dir is not None
@@ -195,9 +188,7 @@ def train(cfg: Config, device: torch.device):
     )
     feature_sample = train_dataset[0]
     features_sample = (
-        feature_sample[0]
-        if isinstance(feature_sample, (tuple, list))
-        else feature_sample
+        feature_sample[0] if isinstance(feature_sample, (tuple, list)) else feature_sample
     )
     if not isinstance(features_sample, (tuple, list)):
         msg = "Unexpected dataset sample structure; expected (features, label)."
@@ -251,9 +242,7 @@ def train(cfg: Config, device: torch.device):
             "batch_size": cfg.batch_size,
             "shuffle": False,
             "num_workers": cfg.num_workers,
-            "persistent_workers": cfg.persistent_workers
-            if cfg.num_workers > 0
-            else False,
+            "persistent_workers": cfg.persistent_workers if cfg.num_workers > 0 else False,
             "pin_memory": cfg.pin_memory,
             "drop_last": False,
             "collate_fn": data_loader.collate_fn,
@@ -288,12 +277,8 @@ def train(cfg: Config, device: torch.device):
                 )
             rollout_interval = None
         else:
-            rollout_loader = data_loader.get_data_loader_by_trajectories(
-                rollout_dataset_path
-            )
-            rollout_evaluator = RolloutEvaluator(
-                rollout_loader, device, cfg.rollout_max_examples
-            )
+            rollout_loader = data_loader.get_data_loader_by_trajectories(rollout_dataset_path)
+            rollout_evaluator = RolloutEvaluator(rollout_loader, device, cfg.rollout_max_examples)
             if is_main_process:
                 print(
                     f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}"
@@ -328,9 +313,7 @@ def train(cfg: Config, device: torch.device):
 
         scaler.unscale_(optimizer)
         parameters = (
-            simulator.module.parameters()
-            if isinstance(simulator, DDP)
-            else simulator.parameters()
+            simulator.module.parameters() if isinstance(simulator, DDP) else simulator.parameters()
         )
         last_grad_norm = _compute_grad_norm(parameters)
 
@@ -457,11 +440,7 @@ def train(cfg: Config, device: torch.device):
             log_parts.append(f"eta={eta_str}")
             print(" ".join(log_parts))
 
-        if (
-            is_main_process
-            and tb_writer is not None
-            and step % tensorboard_interval == 0
-        ):
+        if is_main_process and tb_writer is not None and step % tensorboard_interval == 0:
             tb_writer.add_scalar("train/loss", train_loss, step)
             tb_writer.add_scalar("train/lr", current_lr, step)
             if last_grad_norm is not None:
@@ -525,9 +504,9 @@ def train(cfg: Config, device: torch.device):
                     raise NotImplementedError
                 labels = labels.to(device)
 
-                sampled_noise = noise_sampler(
-                    position, noise_std_last_step=cfg.noise_std
-                ).to(device)
+                sampled_noise = noise_sampler(position, noise_std_last_step=cfg.noise_std).to(
+                    device
+                )
                 non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
                 sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
@@ -566,9 +545,7 @@ def train(cfg: Config, device: torch.device):
             if micro_batch_count > 0 and step < cfg.ntraining_steps:
                 _optimizer_step()
 
-            epoch_avg = (
-                (epoch_train_loss / steps_this_epoch) if steps_this_epoch > 0 else 0.0
-            )
+            epoch_avg = (epoch_train_loss / steps_this_epoch) if steps_this_epoch > 0 else 0.0
             if is_main_process:
                 train_loss_hist.append((epoch, float(epoch_avg)))
                 if dl_valid is not None and validation_interval is not None:
@@ -589,9 +566,7 @@ def train(cfg: Config, device: torch.device):
                             f"[epoch {epoch}] train={epoch_avg:.6f} valid={epoch_valid_loss_float:.6f}"
                         )
                         if tb_writer is not None:
-                            tb_writer.add_scalar(
-                                "epoch/valid_loss", epoch_valid_loss_float, epoch
-                            )
+                            tb_writer.add_scalar("epoch/valid_loss", epoch_valid_loss_float, epoch)
                     else:
                         print(
                             f"[epoch {epoch}] train={epoch_avg:.6f} (validation skipped: dataset empty)"
