@@ -18,6 +18,50 @@ import numpy as np
 import yaml
 
 
+def _candidate_rollout_roots() -> list[Path]:
+    """rolloutファイルの探索ルート候補を集める"""
+    roots: list[Path] = [Path("rollouts"), Path("rollouts_small")]
+    for cfg_name in ("config_rollout.yaml", "config_rollout_small.yaml", "config.yaml"):
+        cfg_path = Path(cfg_name)
+        if not cfg_path.exists():
+            continue
+        try:
+            with cfg_path.open("r", encoding="utf-8") as fp:
+                cfg = yaml.safe_load(fp) or {}
+            output_path = cfg.get("output_path")
+            if output_path:
+                roots.append(Path(output_path))
+        except Exception:
+            # 読み取り失敗時は無視して次へ
+            continue
+    # 重複を除去しつつ順序は維持
+    seen = set()
+    uniq: list[Path] = []
+    for r in roots:
+        if r not in seen:
+            uniq.append(r)
+            seen.add(r)
+    return uniq
+
+
+def _guess_latest_rollout() -> Path | None:
+    """最新の *_ex*.pkl を探索して返す（見つからなければ None）"""
+    candidates: list[tuple[float, Path]] = []
+    for root in _candidate_rollout_roots():
+        if not root.exists():
+            continue
+        for p in root.rglob("*_ex*.pkl"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            candidates.append((mtime, p.resolve()))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[-1][1]
+
+
 def _compute_marker_size(spacing: float | None, scale: float = 1.0) -> float:
     scale = max(0.1, float(scale))
     if spacing is None or spacing <= 0:
@@ -424,7 +468,8 @@ def main():
     parser.add_argument(
         "input",
         type=str,
-        help="Path to rollout pickle file (e.g., rollouts/rollout_ex0.pkl)",
+        nargs="?",
+        help="Path to rollout pickle file (省略時は最新の *_ex*.pkl を自動検出)",
     )
     parser.add_argument(
         "--output",
@@ -457,9 +502,17 @@ def main():
 
     args = parser.parse_args()
 
-    pkl_path = Path(args.input)
-    if not pkl_path.exists():
-        raise FileNotFoundError(f"Rollout file not found: {pkl_path}")
+    if args.input is None:
+        pkl_path = _guess_latest_rollout()
+        if pkl_path is None:
+            raise FileNotFoundError(
+                "入力が指定されておらず、*_ex*.pkl を自動検出できませんでした。"
+            )
+        print(f"No input specified. Using latest rollout: {pkl_path}")
+    else:
+        pkl_path = Path(args.input)
+        if not pkl_path.exists():
+            raise FileNotFoundError(f"Rollout file not found: {pkl_path}")
 
     print(f"Loading rollout from: {pkl_path}")
     data = load_rollout(pkl_path)
@@ -486,6 +539,11 @@ def main():
             output_format = "gif"
         elif ext == ".mp4":
             output_format = "mp4"
+
+    # ffmpeg が無い環境では mp4 生成に失敗するため自動で HTML に切り替える
+    if output_format == "mp4" and not animation.writers.is_available("ffmpeg"):
+        print("ffmpeg が見つからないため出力フォーマットを HTML に変更します。")
+        output_format = "html"
 
     suffix_map = {"mp4": ".mp4", "html": ".html", "gif": ".gif"}
     desired_suffix = suffix_map[output_format]
