@@ -77,10 +77,45 @@ def load_rollout(pkl_path: Path) -> dict:
     return data
 
 
+def _save_animation(
+    fig: plt.Figure,
+    ani: animation.FuncAnimation,
+    output_path: Path | None,
+    output_format: str,
+    fps: int = 20,
+):
+    """アニメーションを指定フォーマットで保存"""
+    suffix_map = {"mp4": ".mp4", "html": ".html", "gif": ".gif"}
+    output_format = output_format.lower()
+    if output_format not in suffix_map:
+        raise ValueError(f"Unsupported output format: {output_format}")
+
+    if output_path is None:
+        print("No output path provided. Showing animation window instead.")
+        plt.show()
+        return
+
+    desired_suffix = suffix_map[output_format]
+    if output_path.suffix.lower() != desired_suffix:
+        output_path = output_path.with_suffix(desired_suffix)
+
+    if output_format == "html":
+        html = ani.to_jshtml(fps=fps)
+        with output_path.open("w", encoding="utf-8") as f:
+            f.write(html)
+    elif output_format == "gif":
+        ani.save(output_path, writer="pillow", fps=fps)
+    else:
+        ani.save(output_path, writer="ffmpeg", fps=fps)
+
+    print(f"Saved {output_format.upper()} animation to {output_path}")
+    plt.close(fig)
+
+
 def visualize_rollout(
     data: dict,
     output_path: Path | None = None,
-    save_as_html: bool = False,
+    output_format: str = "mp4",
     show_initial: bool = True,
     use_blit: bool = False,
 ):
@@ -89,10 +124,14 @@ def visualize_rollout(
 
     Args:
         data: rollout結果の辞書
-        output_path: 保存先パス（Noneの場合は表示のみ）
-        save_as_html: HTMLとして保存するかどうか
+        output_path: 保存先パス（Noneの場合は表示のみ。main経由では既定で入力ファイル名＋.mp4）
+        output_format: 保存フォーマット（"mp4" | "html" | "gif"、既定は"mp4"）
         show_initial: 初期位置を表示するかどうか
     """
+    output_format = output_format.lower()
+    if output_format not in {"mp4", "html", "gif"}:
+        raise ValueError(f"Unsupported output format: {output_format}")
+
     # データを取得
     initial_positions = data["initial_positions"]  # (T_init, N, D)
     predicted_rollout = data["predicted_rollout"]  # (T_pred, B=1, N, D)
@@ -134,7 +173,7 @@ def visualize_rollout(
             particle_spacing,
             marker_scale,
             output_path,
-            save_as_html,
+            output_format,
             data,
             use_blit,
         )
@@ -147,7 +186,7 @@ def visualize_rollout(
             particle_spacing,
             marker_scale,
             output_path,
-            save_as_html,
+            output_format,
             data,
         )
     else:
@@ -162,7 +201,7 @@ def visualize_2d(
     particle_spacing: float | None,
     marker_scale: float,
     output_path: Path | None,
-    save_as_html: bool,
+    output_format: str,
     data: dict,
     use_blit: bool = False,
 ):
@@ -269,27 +308,7 @@ def visualize_2d(
         fig, update, frames=n_frames, interval=50, blit=use_blit
     )
 
-    # 保存または表示
-    backend = matplotlib.get_backend().lower()
-    if save_as_html or "agg" in backend:
-        if output_path is None:
-            output_path = Path("rollout_visualization.html")
-        # Embed frames directly into a single self-contained HTML
-        html = ani.to_jshtml(fps=20)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        print(f"Saved animation to {output_path}")
-        plt.close(fig)
-    elif output_path is not None:
-        # MP4やGIFとして保存
-        if output_path.suffix == ".gif":
-            ani.save(output_path, writer="pillow", fps=20)
-        else:
-            ani.save(output_path, writer="ffmpeg", fps=20)
-        print(f"Saved animation to {output_path}")
-        plt.close(fig)
-    else:
-        plt.show()
+    _save_animation(fig, ani, output_path, output_format, fps=20)
 
 
 def visualize_3d(
@@ -300,7 +319,7 @@ def visualize_3d(
     particle_spacing: float | None,
     marker_scale: float,
     output_path: Path | None,
-    save_as_html: bool,
+    output_format: str,
     data: dict,
     use_blit: bool = False,
 ):
@@ -392,27 +411,7 @@ def visualize_3d(
         fig, update, frames=n_frames, interval=50, blit=use_blit
     )
 
-    # 保存または表示
-    backend = matplotlib.get_backend().lower()
-    if save_as_html or "agg" in backend:
-        if output_path is None:
-            output_path = Path("rollout_visualization_3d.html")
-        # Embed frames directly into a single self-contained HTML
-        html = ani.to_jshtml(fps=20)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        print(f"Saved animation to {output_path}")
-        plt.close(fig)
-    elif output_path is not None:
-        # MP4やGIFとして保存
-        if output_path.suffix == ".gif":
-            ani.save(output_path, writer="pillow", fps=20)
-        else:
-            ani.save(output_path, writer="ffmpeg", fps=20)
-        print(f"Saved animation to {output_path}")
-        plt.close(fig)
-    else:
-        plt.show()
+    _save_animation(fig, ani, output_path, output_format, fps=20)
 
 
 def main():
@@ -430,6 +429,12 @@ def main():
         type=str,
         default=None,
         help="Output path for saving animation (e.g., output.html or output.mp4)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["mp4", "html", "gif"],
+        default="mp4",
+        help="出力フォーマットを指定（既定: mp4）",
     )
     parser.add_argument(
         "--html",
@@ -463,11 +468,40 @@ def main():
         print(f"Mean Loss: {data['loss']:.6f}")
 
     output_path = Path(args.output) if args.output else None
+    output_format = args.format
+
+    # `--html` は後方互換のショートカット
+    if args.html:
+        output_format = "html"
+
+    # 出力パスの拡張子からフォーマットを推測
+    if output_path is not None:
+        ext = output_path.suffix.lower()
+        if ext in {".html", ".htm"}:
+            output_format = "html"
+        elif ext == ".gif":
+            output_format = "gif"
+        elif ext == ".mp4":
+            output_format = "mp4"
+
+    suffix_map = {"mp4": ".mp4", "html": ".html", "gif": ".gif"}
+    desired_suffix = suffix_map[output_format]
+
+    # 出力パスが指定されていない場合は、入力ファイル名に既定拡張子を付けて保存する
+    if output_path is None:
+        output_path = Path(pkl_path).with_suffix(desired_suffix)
+    # フォーマットと拡張子が食い違う場合は合わせる
+    elif output_path.suffix.lower() != desired_suffix:
+        print(
+            f"Warning: output path suffix {output_path.suffix} "
+            f"does not match format {output_format}; using {desired_suffix}."
+        )
+        output_path = output_path.with_suffix(desired_suffix)
 
     visualize_rollout(
         data,
         output_path=output_path,
-        save_as_html=args.html,
+        output_format=output_format,
         show_initial=not args.no_initial,
         use_blit=args.blit,
     )

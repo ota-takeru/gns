@@ -78,20 +78,24 @@ Rollout結果の分析
 推論結果をアニメーションとして可視化します：
 
 ```bash
-# 単一のrolloutを可視化（HTML形式）
-uv run python visualize_rollout.py rollouts/rollout_ex0.pkl --output rollouts/rollout_ex0.html --html
+# 単一のrolloutを可視化（既定は MP4 出力: rollouts/rollout_ex0.mp4）
+uv run python visualize_rollout.py rollouts/rollout_ex0.pkl
+
+# HTML 形式で保存したい場合
+uv run python visualize_rollout.py rollouts/rollout_ex0.pkl --format html
 
 # すべてのrolloutを可視化
 for i in 0 1 2; do
-    uv run python visualize_rollout.py rollouts/rollout_ex${i}.pkl \
-        --output rollouts/rollout_ex${i}.html --html
+    uv run python visualize_rollout.py rollouts/rollout_ex${i}.pkl
 done
 ```
 
 **可視化オプション:**
 
-- `--output PATH`: 出力ファイルのパス（.html, .gif, .mp4 など）
-- `--html`: HTML 形式で保存（強制）
+- `--output PATH`: 出力ファイルのパス（拡張子に合わせて mp4/html/gif を自動選択）
+- `--format {mp4,html,gif}`: 出力フォーマットを明示（既定: mp4）。`--html` は `--format html` のエイリアス
+- `--no-initial`: 初期位置を表示しない
+- `--blit`: blitting を使用して描画を高速化（環境によっては表示崩れの可能性あり）
 
 推論時に生成するシーン数を制限したい場合は、`config_rollout.yaml` に以下を設定します。
 
@@ -99,7 +103,6 @@ done
 rollout_inference_max_examples: 3  # 例: 先頭3シーンのみ生成
 ```
 この設定により `rollouts/rollout_ex{i}.pkl` の生成数が最大 N 件に制限され、可視化対象もその範囲になります。
-- `--no-initial`: 初期位置を表示しない
 
 **可視化の特徴:**
 
@@ -110,7 +113,7 @@ rollout_inference_max_examples: 3  # 例: 先頭3シーンのみ生成
 
 ### 4. 結果の確認
 
-生成された HTML ファイルをブラウザで開いて確認します：
+生成された MP4 ファイルは任意の動画プレーヤーで再生できます。HTML で保存した場合はブラウザで開いて確認します：
 
 ```bash
 # WSL2の場合
