@@ -162,7 +162,7 @@ def _save_animation(
 def visualize_rollout(
     data: dict,
     output_path: Path | None = None,
-    output_format: str = "mp4",
+    output_format: str = "html",
     show_initial: bool = True,
     use_blit: bool = False,
 ):
@@ -172,7 +172,7 @@ def visualize_rollout(
     Args:
         data: rollout結果の辞書
         output_path: 保存先パス（Noneの場合は表示のみ。main経由では既定で入力ファイル名＋.mp4）
-        output_format: 保存フォーマット（"mp4" | "html" | "gif"、既定は"mp4"）
+        output_format: 保存フォーマット（"mp4" | "html" | "gif"、既定は"html"）
         show_initial: 初期位置を表示するかどうか
     """
     output_format = output_format.lower()
@@ -481,8 +481,8 @@ def main():
     parser.add_argument(
         "--format",
         choices=["mp4", "html", "gif"],
-        default="mp4",
-        help="出力フォーマットを指定（既定: mp4）",
+        default="html",
+        help="出力フォーマットを指定（既定: html）",
     )
     parser.add_argument(
         "--html",
