@@ -1,5 +1,5 @@
 mode: train
-data_path: ./datasets/out_fluid/dam_break_left
+data_path: ./datasets/out
 scenario: fluid
 scenario_options:
   rigid:
