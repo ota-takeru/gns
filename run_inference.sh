@@ -11,7 +11,7 @@ echo ""
 CONFIG_PATH="${GNS_CONFIG:-config_rollout.yaml}"
 
 # config から output_path を読み取り、なければ rollouts を既定とする
-ROLL_DIR=$(python - <<'PY'
+ROLL_DIR=$(python - <<PY
 import yaml
 from pathlib import Path
 cfg_path = Path("${CONFIG_PATH}")

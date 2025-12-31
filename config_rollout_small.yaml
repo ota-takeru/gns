@@ -1,4 +1,5 @@
 mode: rollout
+
 data_path: ./datasets/out_fluid/dam_break_left
 scenario: fluid
 scenario_options:
