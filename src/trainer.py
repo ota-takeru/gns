@@ -114,6 +114,7 @@ def train(cfg: Config, device: torch.device):
         elif is_main_process:
             print("Resume files not fully found; starting fresh.")
 
+    simulator: Any = simulator_core
     if distributed:
         ddp_kwargs: dict[str, Any] = {
             "broadcast_buffers": False,
@@ -122,12 +123,10 @@ def train(cfg: Config, device: torch.device):
         if device.type == "cuda":
             ddp_kwargs["device_ids"] = [device.index]
             ddp_kwargs["output_device"] = device.index
-            simulator: Any = DDP(simulator_core, **ddp_kwargs)
-            # 互換性のため、DDP ラッパーにもメソッドを生やしておく
-            simulator.predict_positions = simulator.module.predict_positions
-            simulator.predict_accelerations = simulator.module.predict_accelerations
-        else:
-            simulator = simulator_core
+        simulator = DDP(simulator_core, **ddp_kwargs)
+        # 互換性のため、DDP ラッパーにもメソッドを生やしておく
+        simulator.predict_positions = simulator.module.predict_positions
+        simulator.predict_accelerations = simulator.module.predict_accelerations
 
     optimizer = torch.optim.Adam(simulator.parameters(), lr=cfg.lr_init)
     if resume_state is not None:
