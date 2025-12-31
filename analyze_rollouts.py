@@ -114,7 +114,8 @@ def main():
         print(f"Rolloutsディレクトリを作成しました: {rollouts_dir}")
 
     # サブディレクトリ（method/output_filename/など）も含めて検索
-    pkl_files = sorted(rollouts_dir.rglob("rollout_ex*.pkl"))
+    # 出力ファイル名は設定の `output_filename` に依存するため、プレフィックスは固定しない
+    pkl_files = sorted(rollouts_dir.rglob("*_ex*.pkl"))
     if not pkl_files:
         print("rolloutファイルが見つかりません")
         return
