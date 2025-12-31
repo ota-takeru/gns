@@ -82,6 +82,7 @@ def visualize_rollout(
     output_path: Path | None = None,
     save_as_html: bool = False,
     show_initial: bool = True,
+    use_blit: bool = False,
 ):
     """
     rollout結果を可視化
@@ -135,6 +136,7 @@ def visualize_rollout(
             output_path,
             save_as_html,
             data,
+            use_blit,
         )
     elif dim == 3:
         visualize_3d(
@@ -162,6 +164,7 @@ def visualize_2d(
     output_path: Path | None,
     save_as_html: bool,
     data: dict,
+    use_blit: bool = False,
 ):
     """2Dの可視化"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
@@ -262,7 +265,9 @@ def visualize_2d(
         ax2.set_title(f"Ground Truth (frame={frame}/{n_frames-1})")
         return sc1, sc2
 
-    ani = animation.FuncAnimation(fig, update, frames=n_frames, interval=50, blit=True)
+    ani = animation.FuncAnimation(
+        fig, update, frames=n_frames, interval=50, blit=use_blit
+    )
 
     # 保存または表示
     backend = matplotlib.get_backend().lower()
@@ -297,6 +302,7 @@ def visualize_3d(
     output_path: Path | None,
     save_as_html: bool,
     data: dict,
+    use_blit: bool = False,
 ):
     """3Dの可視化"""
     from mpl_toolkits.mplot3d import Axes3D
@@ -382,7 +388,9 @@ def visualize_3d(
         ax2.set_title(f"Ground Truth (frame={frame}/{n_frames-1})")
         return sc1, sc2
 
-    ani = animation.FuncAnimation(fig, update, frames=n_frames, interval=50, blit=False)
+    ani = animation.FuncAnimation(
+        fig, update, frames=n_frames, interval=50, blit=use_blit
+    )
 
     # 保存または表示
     backend = matplotlib.get_backend().lower()
@@ -433,6 +441,11 @@ def main():
         action="store_true",
         help="Don't show initial positions",
     )
+    parser.add_argument(
+        "--blit",
+        action="store_true",
+        help="Use blitting for animation (may break in some HTML viewers).",
+    )
 
     args = parser.parse_args()
 
@@ -456,6 +469,7 @@ def main():
         output_path=output_path,
         save_as_html=args.html,
         show_initial=not args.no_initial,
+        use_blit=args.blit,
     )
 
 

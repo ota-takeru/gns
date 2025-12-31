@@ -4,27 +4,19 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "numpy>=2.3.3",
-    "pyyaml>=6.0.2",
-    "tqdm>=4.67.1",
-    "wrapt>=2.0.1",
-]
+dependencies = ["numpy>=2.3.3", "pyyaml>=6.0.2", "tqdm>=4.67.1", "wrapt>=2.0.1"]
 
 [dependency-groups]
-dev = [
-    "ruff>=0.14.1",
-    "pytest>=7.4.2",
-]
+dev = ["ruff>=0.14.1", "pytest>=7.4.2"]
 full = [
-    "h5py>=3.14.0",
-    "matplotlib>=3.10.7",
-    "pysph>=1.0b2",
-    "pymunk>=7.1.0",
-    "tensorboard>=2.20.0",
-    "torch-geometric>=2.7.0",
-    "torch>=2.7.0",
-    "torchvision>=0.22.0",
+  "h5py>=3.14.0",
+  "matplotlib>=3.10.7",
+  "pysph>=1.0b2",
+  "pymunk>=7.1.0",
+  "tensorboard>=2.20.0",
+  "torch-geometric>=2.7.0",
+  "torch>=2.7.0",
+  "torchvision>=0.22.0",
 ]
 
 [tool.uv]
@@ -54,25 +46,24 @@ target-version = "py312"
 
 [tool.ruff.lint]
 ignore = [
-    "D100",
-    "D101",
-    "D102",
-    "D103",
-    "D104",
-    "D107",
-    "D400",
-    "D415",
-    "D203",
-    "D205",
-    "D213",
-    "COM812",
-    "ISC001",
-    "ANN201",
-    "S101",
-    "T201",
-    "RET504",
-    "PLR0913",
-    "ERR403",
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "D107",
+  "D400",
+  "D415",
+  "D203",
+  "D205",
+  "D213",
+  "COM812",
+  "ISC001",
+  "ANN201",
+  "S101",
+  "T201",
+  "RET504",
+  "PLR0913",
 ]
 select = ["ALL"]
 

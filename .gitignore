@@ -9,6 +9,7 @@ out/
 rollouts/   
 models/
 models_small/
+rollouts_small/
 out_fluid/      
 
 # Virtual environments
