@@ -6,10 +6,47 @@ rollouts/フォルダ内のすべてのpklファイルを読み込み、
 統計情報を表示します。
 """
 
+import argparse
 import pickle
 from pathlib import Path
 
 import numpy as np
+
+
+def _guess_rollouts_dir(cli_path: str | None) -> Path:
+    """
+    ロールアウト格納ディレクトリの推定
+
+    優先順位:
+      1. CLI 指定 (--rollouts-dir)
+      2. 既存の設定ファイルに記載された output_path
+      3. 既存のフォルダ (rollouts, rollouts_small)
+      4. 既定の "rollouts"
+    """
+    if cli_path:
+        return Path(cli_path)
+
+    import yaml  # 遅延 import で依存のない環境でも動作するようにする
+
+    for cfg_name in ("config_rollout.yaml", "config_rollout_small.yaml", "config.yaml"):
+        cfg_path = Path(cfg_name)
+        if not cfg_path.exists():
+            continue
+        try:
+            with cfg_path.open("r", encoding="utf-8") as fp:
+                cfg = yaml.safe_load(fp) or {}
+            output_path = cfg.get("output_path")
+            if output_path:
+                return Path(output_path)
+        except Exception:
+            # 設定読取に失敗しても他の候補を試す
+            continue
+
+    for candidate in (Path("rollouts"), Path("rollouts_small")):
+        if candidate.exists():
+            return candidate
+
+    return Path("rollouts")
 
 
 def analyze_rollout(pkl_path: Path) -> dict:
@@ -52,10 +89,29 @@ def analyze_rollout(pkl_path: Path) -> dict:
 
 
 def main():
-    rollouts_dir = Path("rollouts")
+    parser = argparse.ArgumentParser(
+        description="Rollout結果の統計をまとめて表示します"
+    )
+    parser.add_argument(
+        "--rollouts-dir",
+        "-r",
+        default=None,
+        help="rollout結果を格納しているディレクトリ。省略時は設定ファイルの output_path か rollouts を自動検出。",
+    )
+    parser.add_argument(
+        "--no-create",
+        action="store_true",
+        help="ディレクトリが存在しない場合に自動作成しない（既定は自動作成）。",
+    )
+    args = parser.parse_args()
+
+    rollouts_dir = _guess_rollouts_dir(args.rollouts_dir)
     if not rollouts_dir.exists():
-        print(f"Rolloutsディレクトリが見つかりません: {rollouts_dir}")
-        return
+        if args.no_create:
+            print(f"Rolloutsディレクトリが見つかりません: {rollouts_dir}")
+            return
+        rollouts_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Rolloutsディレクトリを作成しました: {rollouts_dir}")
 
     # サブディレクトリ（method/output_filename/など）も含めて検索
     pkl_files = sorted(rollouts_dir.rglob("rollout_ex*.pkl"))

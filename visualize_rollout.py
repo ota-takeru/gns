@@ -95,6 +95,9 @@ def _save_animation(
         plt.show()
         return
 
+    # 出力先ディレクトリが無い場合は自動で作成する
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     desired_suffix = suffix_map[output_format]
     if output_path.suffix.lower() != desired_suffix:
         output_path = output_path.with_suffix(desired_suffix)

@@ -33,6 +33,10 @@ def _assert_model_finite(simulator: torch.nn.Module) -> None:
 
 def predict(cfg: Config, device: torch.device):
     """valid / rollout モードの入口"""
+    # 先に出力ディレクトリを確保しておくことで、途中で失敗しても
+    # rollouts/ 配下が用意されるようにする。
+    output_dir = _resolve_output_directory(cfg)
+
     metadata_key = (
         cfg.active_scenario.rollout_metadata_split
         if cfg.active_scenario and cfg.active_scenario.rollout_metadata_split
@@ -48,8 +52,6 @@ def predict(cfg: Config, device: torch.device):
     _assert_model_finite(simulator)
     simulator.to(device)
     simulator.eval()
-
-    output_dir = _resolve_output_directory(cfg)
 
     dataset_path = _resolve_rollout_dataset_path(cfg)
     if dataset_path is None:
