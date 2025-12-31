@@ -5,6 +5,8 @@ scenario_options: {}
 method: hamiltonian_sph
 method_options:
   hamiltonian_sph:
+    # 明示指定しない場合はメタデータから推定される
+    particle_mass: null
     sph:
       rest_density: 1000.0
     integrator:

@@ -55,6 +55,27 @@ def _get_simulator(
     method_options_all = getattr(cfg, "method_options", {}) or {}
     method_options = method_options_all.get(method_name, {})
 
+    def _estimate_particle_mass(meta: dict) -> float | None:
+        """メタデータから粒子質量を推定する。
+
+        rest_density と粒子間隔が分かれば、2D: rho * dx^2 / 3D: rho * dx^3 とする。
+        (public fluid データセットでは dim=2, particle_spacing が存在)
+        """
+
+        try:
+            spacing = float(meta.get("particle_spacing"))
+            rho0 = float(meta.get("rest_density"))
+            dim = int(meta.get("dim"))
+        except (TypeError, ValueError):
+            return None
+        if spacing <= 0 or rho0 <= 0:
+            return None
+        if dim == 3:
+            return rho0 * (spacing ** 3)
+        if dim == 2:
+            return rho0 * (spacing ** 2)
+        return None
+
     base_kwargs = {
         "particle_dimensions": metadata["dim"],
         "nnode_in": nnode_in,
@@ -107,6 +128,15 @@ def _get_simulator(
                 )
                 integrator_cfg.dt = dt_from_meta
             method_options["integrator"] = integrator_cfg
+
+        # 粒子質量が未指定ならメタデータから自動推定する。
+        if "particle_mass" not in method_options or method_options.get("particle_mass") is None:
+            estimated_mass = _estimate_particle_mass(metadata)
+            if estimated_mass is not None:
+                method_options["particle_mass"] = estimated_mass
+                print(
+                    f"[simulator_factory] particle_mass をメタデータから推定: {estimated_mass:.4g}"
+                )
 
     SimulatorClass = get_simulator_class(method_name)
     simulator = SimulatorClass(**(base_kwargs | method_options))

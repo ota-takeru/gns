@@ -13,6 +13,9 @@ method: gns           # 使用する手法（gns で従来挙動）
 method_options:
   hamiltonian_sph:
     # SPH + Hamiltonian GNN バリアント設定
+    # データセットの rest_density と particle_spacing が分かっていれば
+    # 未指定でも自動推定されるが、明示指定したい場合は particle_mass を上書きする。
+    particle_mass: null
     sph:
       smoothing_length: null       # null で connectivity_radius を流用
       rest_density: 1.0
