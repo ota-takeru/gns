@@ -33,7 +33,7 @@ method_options:
     integrator:
       dt: 0.001
       type: leapfrog               # leapfrog|symplectic_euler
-    particle_mass: 1.0
+    particle_mass: null
     gravity: [0.0, -9.81, 0.0]     # 2D なら 2 要素に
     include_external_potential: true
     pos_feature_scale: null        # null で半径を使用
