@@ -203,7 +203,7 @@ if kaggle datasets status "$DATASET_ID" >/dev/null 2>&1; then
   kaggle datasets version -p "$DATASET_DIR" --dir-mode zip -m "auto ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
 else
   echo "データセットが存在しません。新規作成します (--dir-mode zip)." | tee -a "$LOG3"
-  kaggle datasets create -p "$DATASET_DIR" --dir-mode zip -m "init ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
+  kaggle datasets create -p "$DATASET_DIR" --dir-mode zip 2>&1 | tee -a "$LOG3"
 fi
 
 # Step 4: kaggle kernels push
