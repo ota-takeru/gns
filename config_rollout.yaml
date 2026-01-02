@@ -15,7 +15,7 @@ method_options:
     # SPH + Hamiltonian GNN バリアント設定（学習時と揃える）
     sph:
       smoothing_length: null       # null で connectivity_radius を流用
-      rest_density: 1.0
+      rest_density: 1000.0
       sound_speed: 10.0
       gamma: 7.0
       max_num_neighbors: 128
@@ -31,10 +31,10 @@ method_options:
       node_dropout: 0.0
       edge_dropout: 0.0
     integrator:
-      dt: 0.001
+      dt: 0.006
       type: leapfrog               # leapfrog|symplectic_euler
     particle_mass: null
-    gravity: [0.0, -9.81, 0.0]     # 2D なら 2 要素に
+    gravity: [0.0, -9.81]     # 2D データセットに合わせる
     include_external_potential: true
     pos_feature_scale: null        # null で半径を使用
     vel_feature_scale: 1.0
