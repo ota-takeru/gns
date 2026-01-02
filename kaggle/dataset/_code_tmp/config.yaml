@@ -1,0 +1,95 @@
+mode: train # train / valid / rollout
+data_path: ./datasets/out/ # train.npz / valid.npz / test.npz を置くディレクトリ
+scenario: fluid
+scenario_options:
+  rigid:
+    dataset: ./datasets/out
+    description: Default planar rigid-body scenes
+  fluid:
+    dataset: ./datasets/out_fluid/dam_break_left
+    rollout_dataset: valid
+    description: PySPH-based dam break fluid dataset
+method: hamiltonian_sph
+method_options:
+  hamiltonian_sph:
+    # SPH + Hamiltonian GNN バリアント設定
+    # データセットの rest_density と particle_spacing が分かっていれば
+    # 未指定でも自動推定されるが、明示指定したい場合は particle_mass を上書きする。
+    particle_mass: null
+    sph:
+      smoothing_length: null       # null で connectivity_radius を流用
+      rest_density: 1000.0
+      sound_speed: 10.0
+      gamma: 7.0
+      max_num_neighbors: 128
+    hamiltonian_net:
+      variant: varB                # varA|varB|varC
+      latent_dim: 128
+      message_passing_steps: 4
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      use_velocity_in_H: false
+      use_density_in_H: true
+      use_sph_features: false
+      node_dropout: 0.0
+      edge_dropout: 0.0
+    integrator:
+      dt: 0.006
+      type: leapfrog               # leapfrog|symplectic_euler
+    particle_mass: null
+    gravity: [0.0, -9.81]     # 2D データセットに合わせる
+    include_external_potential: true
+    pos_feature_scale: null        # null で半径を使用
+    vel_feature_scale: 1.0
+    rho_feature_scale: null        # null で rest_density を使用
+model_path: ./models/ # モデルやtrain_stateの保存先
+output_path: ./rollouts/
+output_filename: rollout
+
+batch_size: 32
+noise_std: 0.0003
+noise: random_walk     # ノイズ生成の種類（デフォルト従来挙動）
+loss: acceleration     # ロス関数（デフォルト従来挙動）
+
+# トレーニング
+ntraining_steps: 1000000
+validation_interval: 10000 # 例: 10000 にするとステップごとに簡易valid
+nsave_steps: 50000
+rollout_interval: 20000 # ロールアウト計測を無効化する場合は null
+rollout_max_examples: 1 # ロールアウト評価に使うシーン数
+rollout_dataset: null # null なら valid/test/train の順で自動選択
+train_dataset_fraction: null # 0-1 で学習データを間引く(nullで全量)
+valid_dataset_fraction: null # 0-1 で検証データを間引く(nullで全量)
+train_dataset_count: null # 学習データの使用件数を直接指定(nullで制限なし)
+valid_dataset_count: null # 検証データの使用件数を直接指定(nullで制限なし)
+tensorboard_enable: false # TensorBoard ロギングを有効化するか（デフォルト無効）
+tensorboard_log_dir: null # null の場合は model_path/tb
+log_interval: 500 # 学習ログを出力するステップ間隔
+tensorboard_interval: 100 # TensorBoard に書き込むステップ間隔（null で log_interval と同じ）
+tensorboard_port: null # 自動割当
+tensorboard_host: null # 省略時は 127.0.0.1
+
+# 学習率（指数減衰）
+lr_init: 0.0001
+lr_decay: 0.1
+lr_decay_steps: 5000000
+
+# 再開関連（"latest" で自動復帰 / null なら新規）
+model_file: null
+train_state_file: null
+
+# GPU選択（null で自動）
+cuda_device_number: null
+seed: 42
+enable_ddp: true
+ddp_backend: nccl
+ddp_timeout_sec: 1800
+# 使われていないパラメータを探すかどうか（デフォルト: true）
+ddp_find_unused_parameters: true
+amp_enable: true
+amp_dtype: float16
+gradient_accumulation_steps: 1
+num_workers: 4
+persistent_workers: true
+pin_memory: true
+prefetch_factor: 4

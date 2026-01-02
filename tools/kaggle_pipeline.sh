@@ -195,26 +195,28 @@ echo "generated_by_kaggle_pipeline ${TIMESTAMP} ${GIT_SHA}" > "${DATASET_DIR}/.p
 
 # ノートブック側で展開は行わないが、アップロード用に code.zip も添付しておく
 echo "code ディレクトリを code.zip に圧縮します。" | tee -a "$LOG2"
-pushd "$CODE_DST" >/dev/null
-rm -f "${DATASET_DIR}/code.zip"
+DATASET_ABS=$(cd "$DATASET_DIR" && pwd)
+CODE_DST_ABS="${DATASET_ABS}/${CODE_DST_SUBDIR}"
+ZIP_OUT="${DATASET_ABS}/code.zip"
+rm -f "$ZIP_OUT"
 if command -v zip >/dev/null 2>&1; then
-  zip -rq "${DATASET_DIR}/code.zip" . 2>&1 | tee -a "$LOG2"
+  (cd "$CODE_DST_ABS" && zip -rq "$ZIP_OUT" .) 2>&1 | tee -a "$LOG2"
 else
   echo "zip コマンドが見つからないため python3 -m zipfile で代替します。" | tee -a "$LOG2"
-  python3 - "${DATASET_DIR}/code.zip" <<'PY' 2>&1 | tee -a "$LOG2"
+  python3 - "$CODE_DST_ABS" "$ZIP_OUT" <<'PY' 2>&1 | tee -a "$LOG2"
 import sys
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
-zip_path = Path(sys.argv[1])
+src_dir = Path(sys.argv[1])
+zip_path = Path(sys.argv[2])
 with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as zf:
-    for path in Path(".").rglob("*"):
+    for path in src_dir.rglob("*"):
         if path.is_file():
-            zf.write(path, path.as_posix())
+            zf.write(path, path.relative_to(src_dir).as_posix())
 print("python zipfile で code.zip を生成しました。")
 PY
 fi
-popd >/dev/null
 
 # アップロードには code.zip のみを残し、展開元ディレクトリは削除する
 rm -rf "$CODE_DST"
