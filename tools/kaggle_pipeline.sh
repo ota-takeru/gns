@@ -190,6 +190,13 @@ if (( ${#missing[@]} )); then
 fi
 rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a "$LOG2"
 
+# zip 化してノートブックが期待する /kaggle/input/${DATASET_SLUG}/code.zip を用意
+echo "code ディレクトリを code.zip に圧縮します。" | tee -a "$LOG2"
+pushd "$DATASET_DIR" >/dev/null
+rm -f code.zip
+zip -rq code.zip "$CODE_DST_SUBDIR" 2>&1 | tee -a "$LOG2"
+popd >/dev/null
+
 # Step 3: kaggle datasets version
 : > "$LOG3"
 echo "[3/6] kaggle datasets version を実行します (${DATASET_ID})." | tee -a "$LOG3"
