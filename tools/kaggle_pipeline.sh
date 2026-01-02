@@ -206,6 +206,27 @@ else
   kaggle datasets create -p "$DATASET_DIR" --dir-mode zip 2>&1 | tee -a "$LOG3"
 fi
 
+# データセットの状態が ready になるまで待機（カーネルで参照できるようにする）
+echo "データセットの準備完了を待機します (${DATASET_ID})." | tee -a "$LOG3"
+dataset_wait_start=$(date +%s)
+dataset_wait_timeout=300  # 5分
+while true; do
+  set +o pipefail
+  status_out=$(kaggle datasets status "$DATASET_ID" 2>&1 | tee -a "$LOG3")
+  status_rc=${PIPESTATUS[0]}
+  set -o pipefail
+  if (( status_rc == 0 )) && echo "$status_out" | grep -qiE "ready|complete|success"; then
+    echo "データセットが利用可能になりました (${DATASET_ID})." | tee -a "$LOG3"
+    break
+  fi
+  now_ts=$(date +%s)
+  if (( now_ts - dataset_wait_start > dataset_wait_timeout )); then
+    echo "データセットの準備待ちがタイムアウトしました (${dataset_wait_timeout}s)。" | tee -a "$LOG3"
+    break
+  fi
+  sleep 10
+done
+
 # Step 4: kaggle kernels push
 : > "$LOG4"
 echo "[4/6] kaggle kernels push を実行します (${TMP_KERNEL_DIR})." | tee -a "$LOG4"
