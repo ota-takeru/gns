@@ -13,6 +13,7 @@ rollouts_small/
 out_fluid/      
 runs/
 kaggle/kernal/code/
+kaggle/dataset/code/
 
 # Virtual environments
 .venv
