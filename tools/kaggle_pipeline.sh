@@ -194,7 +194,26 @@ rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a
 echo "code ディレクトリを code.zip に圧縮します。" | tee -a "$LOG2"
 pushd "$DATASET_DIR" >/dev/null
 rm -f code.zip
-zip -rq code.zip "$CODE_DST_SUBDIR" 2>&1 | tee -a "$LOG2"
+if command -v zip >/dev/null 2>&1; then
+  zip -rq code.zip "$CODE_DST_SUBDIR" 2>&1 | tee -a "$LOG2"
+else
+  echo "zip コマンドが見つからないため python3 -m zipfile で代替します。" | tee -a "$LOG2"
+  python3 - "$CODE_DST_SUBDIR" <<'PY' 2>&1 | tee -a "$LOG2"
+import sys
+from pathlib import Path
+from zipfile import ZipFile, ZIP_DEFLATED
+
+subdir = Path(sys.argv[1])
+if not subdir.is_dir():
+    sys.exit(f"対象ディレクトリが存在しません: {subdir}")
+
+with ZipFile("code.zip", "w", compression=ZIP_DEFLATED) as zf:
+    for path in subdir.rglob("*"):
+        if path.is_file():
+            zf.write(path, path.as_posix())
+print("python zipfile で code.zip を生成しました。")
+PY
+fi
 popd >/dev/null
 
 # Step 3: kaggle datasets version
