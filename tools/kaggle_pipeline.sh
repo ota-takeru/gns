@@ -31,7 +31,7 @@ KERNEL_REF="${KAGGLE_KERNEL_REF:-}"
 INTERVAL=30
 TIMEOUT=3600
 
-CODE_DST_SUBDIR="code"
+CODE_DST_SUBDIR=""  # 空にしてデータセット直下に配置
 CODE_SRCS=(
   "src"
   "analyze_rollouts.py"
@@ -153,7 +153,7 @@ GIT_SHA=$(git rev-parse --short HEAD)
 RUN_DIR="${REPO_ROOT}/runs/${TIMESTAMP}_${GIT_SHA}"
 OUT_DIR="${RUN_DIR}/output"
 TMP_KERNEL_DIR="${RUN_DIR}/kernel_payload"
-CODE_DST="${DATASET_DIR}/${CODE_DST_SUBDIR}"
+CODE_DST="${DATASET_DIR}"
 
 mkdir -p "$RUN_DIR"
 
@@ -174,9 +174,9 @@ echo "Dataset: ${DATASET_DIR}"
 
 # Step 2: sync code into dataset (uncompressed)
 : > "$LOG2"
-echo "[2/6] コードをデータセットにそのまま配置します (${CODE_DST})." | tee -a "$LOG2"
-rm -f "${DATASET_DIR}/code.zip"
-rm -rf "$CODE_DST"
+echo "[2/6] コードをデータセット直下に配置します (${CODE_DST})." | tee -a "$LOG2"
+# dataset-metadata.json だけ残して他をクリア
+find "$DATASET_DIR" -mindepth 1 -maxdepth 1 ! -name 'dataset-metadata.json' -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$CODE_DST"
 missing=()
 for src in "${CODE_SRCS[@]}"; do
@@ -192,32 +192,6 @@ rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a
 
 # バージョン識別用の小さなスタンプを追加して、差分がない場合の 400 エラーを回避
 echo "generated_by_kaggle_pipeline ${TIMESTAMP} ${GIT_SHA}" > "${CODE_DST}/.pipeline_version"
-
-# zip 化してノートブックが期待する /kaggle/input/${DATASET_SLUG}/code.zip を用意
-echo "code ディレクトリを code.zip に圧縮します。" | tee -a "$LOG2"
-pushd "$DATASET_DIR" >/dev/null
-rm -f code.zip
-if command -v zip >/dev/null 2>&1; then
-  zip -rq code.zip "$CODE_DST_SUBDIR" 2>&1 | tee -a "$LOG2"
-else
-  echo "zip コマンドが見つからないため python3 -m zipfile で代替します。" | tee -a "$LOG2"
-  python3 - "$CODE_DST_SUBDIR" <<'PY' 2>&1 | tee -a "$LOG2"
-import sys
-from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
-
-subdir = Path(sys.argv[1])
-if not subdir.is_dir():
-    sys.exit(f"対象ディレクトリが存在しません: {subdir}")
-
-with ZipFile("code.zip", "w", compression=ZIP_DEFLATED) as zf:
-    for path in subdir.rglob("*"):
-        if path.is_file():
-            zf.write(path, path.as_posix())
-print("python zipfile で code.zip を生成しました。")
-PY
-fi
-popd >/dev/null
 
 # Step 3: kaggle datasets version
 : > "$LOG3"
