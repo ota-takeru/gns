@@ -313,14 +313,25 @@ kaggle kernels output "$KERNEL_REF" -p "$OUT_DIR" 2>&1 | tee -a "$LOG6"
 find "$OUT_DIR" -maxdepth 2 -type d -name "code" -prune -exec rm -rf {} + 2>/dev/null || true
 find "$OUT_DIR" -type f \( -name "*.json" -o -name "*.ipynb" \) -delete 2>/dev/null || true
 
-# Kaggle の出力ログは run.log / output.log / stdout.txt など環境で異なるので柔軟に判定
+# Kaggle が教えてくれるログファイル名を優先採用する（環境依存の揺れを吸収）
 log_file=""
-for candidate in run.log output.log stdout.txt; do
-  if [[ -f "${OUT_DIR}/${candidate}" ]]; then
-    log_file="$candidate"
-    break
-  fi
-done
+downloaded_log=$(
+  grep -F "Kernel log downloaded to" "$LOG6" | tail -n1 | sed 's/.*Kernel log downloaded to //'
+) || true
+if [[ -n "$downloaded_log" && -f "$downloaded_log" ]]; then
+  # 期待通り OUT_DIR 配下にあるはずだが、念のため存在確認のみ行う
+  log_file="$(basename "$downloaded_log")"
+fi
+
+# 上記で取得できない場合のフォールバック
+if [[ -z "$log_file" ]]; then
+  for candidate in run.log output.log stdout.txt; do
+    if [[ -f "${OUT_DIR}/${candidate}" ]]; then
+      log_file="$candidate"
+      break
+    fi
+  done
+fi
 
 if [[ -z "$log_file" ]]; then
   echo "ログファイル(run.log / output.log / stdout.txt)が出力に存在しません。失敗扱いとします。" | tee -a "$LOG6"
