@@ -25,6 +25,7 @@ EOF
 }
 
 DATASET_DIR="kaggle/dataset"
+DATASET_META="${DATASET_DIR}/dataset-metadata.json"
 KERNEL_DIR="kaggle/kernal"
 KERNEL_REF="${KAGGLE_KERNEL_REF:-}"
 INTERVAL=30
@@ -108,8 +109,26 @@ if [[ ! -d "$DATASET_DIR" ]]; then
   echo "データセットディレクトリが存在しません: ${DATASET_DIR}" >&2
   exit 1
 fi
-if [[ ! -f "${DATASET_DIR}/dataset-metadata.json" ]]; then
+if [[ ! -f "$DATASET_META" ]]; then
   echo "dataset-metadata.json が ${DATASET_DIR} に存在しません。既存データセットのメタデータを配置してください。" >&2
+  exit 1
+fi
+DATASET_ID=$(
+  python3 - "$DATASET_META" <<'PY' 2>/dev/null
+import json, sys
+from pathlib import Path
+meta = Path(sys.argv[1])
+try:
+    data = json.loads(meta.read_text())
+    dataset_id = data.get("id", "").strip()
+    if dataset_id:
+        print(dataset_id)
+except Exception:
+    pass
+PY
+) || true
+if [[ -z "$DATASET_ID" ]]; then
+  echo "dataset-metadata.json から id を取得できませんでした。id を設定してください。" >&2
   exit 1
 fi
 
@@ -173,13 +192,19 @@ rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a
 
 # Step 3: kaggle datasets version
 : > "$LOG3"
-echo "[3/6] kaggle datasets version を実行します (${DATASET_DIR})." | tee -a "$LOG3"
+echo "[3/6] kaggle datasets version を実行します (${DATASET_ID})." | tee -a "$LOG3"
 file_count=$(find "$DATASET_DIR" -type f ! -name 'dataset-metadata.json' | wc -l)
 if (( file_count == 0 )); then
   echo "データセットに実ファイルがありません。dataset-metadata.json 以外のファイルを配置してください。" | tee -a "$LOG3"
   exit 1
 fi
-kaggle datasets version -p "$DATASET_DIR" --dir-mode zip -m "auto ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
+if kaggle datasets status "$DATASET_ID" >/dev/null 2>&1; then
+  echo "既存データセットを検出: ${DATASET_ID} -> version を作成します。" | tee -a "$LOG3"
+  kaggle datasets version -p "$DATASET_DIR" --dir-mode zip -m "auto ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
+else
+  echo "データセットが存在しません。新規作成します (--dir-mode zip)." | tee -a "$LOG3"
+  kaggle datasets create -p "$DATASET_DIR" --dir-mode zip -m "init ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
+fi
 
 # Step 4: kaggle kernels push
 : > "$LOG4"
