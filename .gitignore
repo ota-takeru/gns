@@ -11,6 +11,8 @@ models/
 models_small/
 rollouts_small/
 out_fluid/      
+runs/
+kaggle/kernal/code/
 
 # Virtual environments
 .venv

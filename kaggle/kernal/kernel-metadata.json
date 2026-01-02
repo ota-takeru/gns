@@ -1,0 +1,16 @@
+{
+    "id": "takerv/4929f3efc12972a71f4cfa2ce723da90",
+    "title": "train-valid",
+    "code_file": "train-valid.ipynb",
+    "language": "python",
+    "kernel_type": "notebook",
+    "is_private": false,
+    "enable_gpu": true,
+    "enable_internet": true,
+    "dataset_sources": [
+        "takerv/dam-break-left",
+        "takerv/gns-solid"
+    ],
+    "competition_sources": [],
+    "kernel_sources": []
+}
