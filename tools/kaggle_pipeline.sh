@@ -190,6 +190,9 @@ if (( ${#missing[@]} )); then
 fi
 rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a "$LOG2"
 
+# バージョン識別用の小さなスタンプを追加して、差分がない場合の 400 エラーを回避
+echo "generated_by_kaggle_pipeline ${TIMESTAMP} ${GIT_SHA}" > "${CODE_DST}/.pipeline_version"
+
 # zip 化してノートブックが期待する /kaggle/input/${DATASET_SLUG}/code.zip を用意
 echo "code ディレクトリを code.zip に圧縮します。" | tee -a "$LOG2"
 pushd "$DATASET_DIR" >/dev/null
