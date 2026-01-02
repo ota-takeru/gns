@@ -17,6 +17,10 @@ Kaggle パイプライン実行スクリプト
   --interval SEC       ステータス確認間隔秒 (デフォルト: 30)
   --timeout SEC        ステータス待ちタイムアウト秒 (デフォルト: 3600)
   -h, --help           このヘルプを表示
+
+備考:
+  - 実行時に未コミットの変更があれば自動で `git add -A && git commit` し、続けて push します。
+  - 変更がない場合は既存の HEAD をそのまま push します。
 EOF
 }
 
@@ -77,7 +81,8 @@ if [[ -z "$KERNEL_REF" ]]; then
   META_PATH="${KERNEL_DIR}/kernel-metadata.json"
   if [[ -f "$META_PATH" ]]; then
     # kernel-metadata.json の id をデフォルト参照として使う
-    KERNEL_REF=$(python3 - <<'PY' 2>/dev/null || true
+    KERNEL_REF=$(
+      python3 - "$META_PATH" <<'PY' 2>/dev/null
 import json, sys
 from pathlib import Path
 meta = Path(sys.argv[1])
@@ -89,7 +94,7 @@ try:
 except Exception:
     pass
 PY
-"$META_PATH")
+    ) || true
   fi
 fi
 
@@ -114,6 +119,22 @@ if (( RUN_DATASET )); then
 fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# Step 1: git add / commit / push
+LOG1_TMP=$(mktemp)
+{
+  echo "[1/6] git add/commit/push を実行します。"
+  status_output=$(git status --porcelain)
+  if [[ -z "$status_output" ]]; then
+    echo "変更なし: 既存の HEAD をプッシュします。"
+  else
+    echo "変更を検出: 自動コミットを実施します。"
+    git add -A
+    git commit -m "kaggle pipeline auto-commit ${TIMESTAMP}"
+  fi
+  git push
+} 2>&1 | tee "$LOG1_TMP"
+
 GIT_SHA=$(git rev-parse --short HEAD)
 RUN_DIR="${REPO_ROOT}/runs/${TIMESTAMP}_${GIT_SHA}"
 OUT_DIR="${RUN_DIR}/output"
@@ -128,6 +149,8 @@ LOG4="${RUN_DIR}/04_kernel_push.log"
 LOG5="${RUN_DIR}/05_kernel_wait.log"
 LOG6="${RUN_DIR}/06_kernel_output.log"
 
+mv "$LOG1_TMP" "$LOG1"
+
 echo "Run ID: ${TIMESTAMP}_${GIT_SHA}"
 echo "Logs:   ${RUN_DIR}"
 echo "Output: ${OUT_DIR}"
@@ -137,15 +160,6 @@ if (( RUN_DATASET )); then
 else
   echo "Dataset: (skip)"
 fi
-
-# Step 1: git push
-: > "$LOG1"
-echo "[1/6] git push を実行します。" | tee -a "$LOG1"
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "作業ツリーに未コミットの変更があります。コミットまたは退避してから実行してください。" | tee -a "$LOG1"
-  exit 1
-fi
-git push 2>&1 | tee -a "$LOG1"
 
 # Step 2: bundle code into kernel dir
 : > "$LOG2"
