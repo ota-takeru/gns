@@ -203,7 +203,21 @@ kaggle kernels push -p "$KERNEL_DIR" 2>&1 | tee -a "$LOG4"
 echo "[5/6] カーネル完了待ちを開始します (${KERNEL_REF}). interval=${INTERVAL}s timeout=${TIMEOUT}s" | tee -a "$LOG5"
 start_ts=$(date +%s)
 while true; do
+  # kaggle CLI が 403/500 を返しても原因を出したいので、一時的に pipefail を外して exit コードを捕捉する
+  set +o pipefail
   status_output=$(kaggle kernels status "$KERNEL_REF" 2>&1 | tee -a "$LOG5")
+  status_rc=${PIPESTATUS[0]}
+  set -o pipefail
+
+  if (( status_rc != 0 )); then
+    if echo "$status_output" | grep -qi "403"; then
+      echo "ステータス取得で 403 Forbidden。kernel-metadata.json の id が正しいか、カーネルが公開/自分のものか確認してください (期待値例: ${KERNEL_REF})." | tee -a "$LOG5"
+    else
+      echo "ステータス取得に失敗しました (exit=${status_rc})。" | tee -a "$LOG5"
+    fi
+    exit 1
+  fi
+
   if echo "$status_output" | grep -qiE "complete|success"; then
     echo "ステータス: 完了を検知しました。" | tee -a "$LOG5"
     break
