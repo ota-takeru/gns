@@ -10,7 +10,6 @@ Kaggle パイプライン実行スクリプト
 
 オプション:
   --dataset-dir PATH   kaggle datasets version に渡すパス (デフォルト: kaggle/dataset)
-  --with-dataset       データセットのバージョンアップを有効化（デフォルト: 無効）
   --kernel-dir PATH    kaggle kernels push に渡すパス (デフォルト: kaggle/kernal)
   --kernel-ref REF     カーネル参照 (user/slug)。指定がなければ
                        KAGGLE_KERNEL_REF もしくは KAGGLE_USERNAME + KAGGLE_KERNEL_SLUG を使用
@@ -21,17 +20,17 @@ Kaggle パイプライン実行スクリプト
 備考:
   - 実行時に未コミットの変更があれば自動で `git add -A && git commit` し、続けて push します。
   - 変更がない場合は既存の HEAD をそのまま push します。
+  - Kaggle へ送るファイルは一時ディレクトリに展開してから push するため、リポジトリの .gitignore には影響されません。
 EOF
 }
 
 DATASET_DIR="kaggle/dataset"
-RUN_DATASET=0
 KERNEL_DIR="kaggle/kernal"
 KERNEL_REF="${KAGGLE_KERNEL_REF:-}"
 INTERVAL=30
 TIMEOUT=3600
 
-# Kaggle カーネルに同梱するコードをまとめる対象
+CODE_DST_SUBDIR="code"
 CODE_SRCS=(
   "src"
   "analyze_rollouts.py"
@@ -45,12 +44,10 @@ CODE_SRCS=(
   "pyproject.toml"
   "uv.lock"
 )
-CODE_BUNDLE_NAME="code"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dataset-dir) DATASET_DIR="$2"; RUN_DATASET=1; shift 2;;
-    --with-dataset) RUN_DATASET=1; shift;;
+    --dataset-dir) DATASET_DIR="$2"; shift 2;;
     --kernel-dir) KERNEL_DIR="$2"; shift 2;;
     --kernel-ref) KERNEL_REF="$2"; shift 2;;
     --interval) INTERVAL="$2"; shift 2;;
@@ -107,15 +104,13 @@ if [[ -z "$KERNEL_REF" ]]; then
   fi
 fi
 
-if (( RUN_DATASET )); then
-  if [[ ! -d "$DATASET_DIR" ]]; then
-    echo "データセットディレクトリが存在しません: ${DATASET_DIR}" >&2
-    exit 1
-  fi
-  if [[ ! -f "${DATASET_DIR}/dataset-metadata.json" ]]; then
-    echo "dataset-metadata.json が ${DATASET_DIR} に存在しません。既存データセットのメタデータを配置してください。" >&2
-    exit 1
-  fi
+if [[ ! -d "$DATASET_DIR" ]]; then
+  echo "データセットディレクトリが存在しません: ${DATASET_DIR}" >&2
+  exit 1
+fi
+if [[ ! -f "${DATASET_DIR}/dataset-metadata.json" ]]; then
+  echo "dataset-metadata.json が ${DATASET_DIR} に存在しません。既存データセットのメタデータを配置してください。" >&2
+  exit 1
 fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -138,12 +133,13 @@ LOG1_TMP=$(mktemp)
 GIT_SHA=$(git rev-parse --short HEAD)
 RUN_DIR="${REPO_ROOT}/runs/${TIMESTAMP}_${GIT_SHA}"
 OUT_DIR="${RUN_DIR}/output"
-CODE_DST="${KERNEL_DIR}/${CODE_BUNDLE_NAME}"
+TMP_KERNEL_DIR="${RUN_DIR}/kernel_payload"
+CODE_DST="${DATASET_DIR}/${CODE_DST_SUBDIR}"
 
 mkdir -p "$RUN_DIR"
 
 LOG1="${RUN_DIR}/01_git_push.log"
-LOG2="${RUN_DIR}/02_bundle_code.log"
+LOG2="${RUN_DIR}/02_sync_code.log"
 LOG3="${RUN_DIR}/03_dataset_version.log"
 LOG4="${RUN_DIR}/04_kernel_push.log"
 LOG5="${RUN_DIR}/05_kernel_wait.log"
@@ -154,16 +150,13 @@ mv "$LOG1_TMP" "$LOG1"
 echo "Run ID: ${TIMESTAMP}_${GIT_SHA}"
 echo "Logs:   ${RUN_DIR}"
 echo "Output: ${OUT_DIR}"
-echo "Bundle: ${CODE_DST}"
-if (( RUN_DATASET )); then
-  echo "Dataset: ${DATASET_DIR}"
-else
-  echo "Dataset: (skip)"
-fi
+echo "Code:   ${CODE_DST}"
+echo "Dataset: ${DATASET_DIR}"
 
-# Step 2: bundle code into kernel dir
+# Step 2: sync code into dataset (uncompressed)
 : > "$LOG2"
-echo "[2/6] カーネルに同梱するコードを準備します (${CODE_DST})." | tee -a "$LOG2"
+echo "[2/6] コードをデータセットにそのまま配置します (${CODE_DST})." | tee -a "$LOG2"
+rm -f "${DATASET_DIR}/code.zip"
 rm -rf "$CODE_DST"
 mkdir -p "$CODE_DST"
 missing=()
@@ -176,27 +169,25 @@ if (( ${#missing[@]} )); then
   echo "存在しないパスがあります: ${missing[*]}" | tee -a "$LOG2"
   exit 1
 fi
-rsync_opts=(-a --delete)
-rsync "${rsync_opts[@]}" "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a "$LOG2"
+rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a "$LOG2"
 
-# Step 3: kaggle datasets version (optional)
+# Step 3: kaggle datasets version
 : > "$LOG3"
-if (( RUN_DATASET )); then
-  echo "[3/6] kaggle datasets version を実行します (${DATASET_DIR})." | tee -a "$LOG3"
-  file_count=$(find "$DATASET_DIR" -type f ! -name 'dataset-metadata.json' | wc -l)
-  if (( file_count == 0 )); then
-    echo "データセットに実ファイルがありません。dataset-metadata.json 以外のファイルを配置してください。" | tee -a "$LOG3"
-    exit 1
-  fi
-  kaggle datasets version -p "$DATASET_DIR" --dir-mode zip -m "auto ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
-else
-  echo "[3/6] データセット更新はスキップ (--with-dataset 未指定)。" | tee -a "$LOG3"
+echo "[3/6] kaggle datasets version を実行します (${DATASET_DIR})." | tee -a "$LOG3"
+file_count=$(find "$DATASET_DIR" -type f ! -name 'dataset-metadata.json' | wc -l)
+if (( file_count == 0 )); then
+  echo "データセットに実ファイルがありません。dataset-metadata.json 以外のファイルを配置してください。" | tee -a "$LOG3"
+  exit 1
 fi
+kaggle datasets version -p "$DATASET_DIR" --dir-mode zip -m "auto ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
 
 # Step 4: kaggle kernels push
 : > "$LOG4"
-echo "[4/6] kaggle kernels push を実行します (${KERNEL_DIR})." | tee -a "$LOG4"
-kaggle kernels push -p "$KERNEL_DIR" 2>&1 | tee -a "$LOG4"
+echo "[4/6] kaggle kernels push を実行します (${TMP_KERNEL_DIR})." | tee -a "$LOG4"
+rm -rf "$TMP_KERNEL_DIR"
+mkdir -p "$TMP_KERNEL_DIR"
+rsync -a --delete "${KERNEL_DIR}/" "${TMP_KERNEL_DIR}/" 2>&1 | tee -a "$LOG4"
+kaggle kernels push -p "$TMP_KERNEL_DIR" 2>&1 | tee -a "$LOG4"
 
 # Step 5: wait for kernel completion
 : > "$LOG5"

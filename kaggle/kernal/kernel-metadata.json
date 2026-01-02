@@ -8,8 +8,8 @@
     "enable_gpu": true,
     "enable_internet": true,
     "dataset_sources": [
-        "takerv/dam-break-left",
-        "takerv/gns-solid"
+        "takerv/gns-solid",
+        "takerv/dam-break-left"
     ],
     "competition_sources": [],
     "kernel_sources": []
