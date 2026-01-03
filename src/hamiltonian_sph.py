@@ -531,8 +531,7 @@ class HamiltonianSPHSimulator(BaseSimulator):
             gamma=self._sph.gamma,
         )
         mass = torch.full_like(rho, self._particle_mass, dtype=rho.dtype)
-        n = max(float(rho.numel()), 1.0)
-        return (mass * u).sum() / n
+        return (mass * u).sum()
 
     # ------------------------------------------------------------------
     # ハミルトニアンとその勾配
@@ -557,7 +556,6 @@ class HamiltonianSPHSimulator(BaseSimulator):
         edge_index: torch.Tensor,
     ) -> torch.Tensor:
         """ポテンシャル項のみを集約したスカラー U。"""
-        n_particles = max(float(x.shape[0]), 1.0)
         potential_terms = []
         if self._ham_cfg.variant in {"varB", "varC"}:
             potential_terms.append(self._sph_potential(rho))
@@ -574,7 +572,8 @@ class HamiltonianSPHSimulator(BaseSimulator):
         if self._include_external_potential and self._gravity is not None:
             mass = torch.as_tensor(self._particle_mass, device=x.device, dtype=x.dtype)
             g = self._gravity.to(x.device)
-            potential_terms.append(-(mass * g * x).sum() / n_particles)
+            # 外力は正規化しない（1/Nで割ると重力加速度が弱まるため）
+            potential_terms.append(-(mass * g * x).sum())
 
         if self._sph.use_wall_potential:
             potential_terms.append(self._wall_potential_energy(x))
@@ -612,9 +611,7 @@ class HamiltonianSPHSimulator(BaseSimulator):
             particle_type_i=particle_type[i_idx],
             particle_type_j=particle_type[j_idx],
         )
-        # 粒子あたりエネルギーに合わせて N で正規化し、近傍数変動によるスケール揺れを防ぐ。
-        n_particles = max(float(x.shape[0]), 1.0)
-        return u_pair.sum() / n_particles
+        return u_pair.sum()
 
     def _wall_potential_energy(self, x: torch.Tensor) -> torch.Tensor:
         """境界近傍で滑らかに反発するポテンシャルエネルギー U_wall を返す。"""
@@ -633,8 +630,7 @@ class HamiltonianSPHSimulator(BaseSimulator):
         penetration_upper = torch.clamp(width - dist_upper, min=0.0)
 
         # k/p * d^p としておくと勾配は k * d^{p-1} になり、p=2 でバネ相当
-        n = max(float(x.shape[0]), 1.0)
-        energy = (k / p) * (penetration_lower.pow(p) + penetration_upper.pow(p)).sum() / n
+        energy = (k / p) * (penetration_lower.pow(p) + penetration_upper.pow(p)).sum()
         return energy
 
     def _hamiltonian_dynamics(
