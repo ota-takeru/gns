@@ -312,7 +312,8 @@ def train(cfg: Config, device: torch.device):
             return
 
         scaler.unscale_(optimizer)
-        parameters = (
+        # generator を 2 回以上消費しないようリスト化して使い回す
+        parameters = list(
             simulator.module.parameters() if isinstance(simulator, DDP) else simulator.parameters()
         )
         if cfg.max_grad_norm is not None and cfg.max_grad_norm > 0:
