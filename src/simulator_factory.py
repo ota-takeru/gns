@@ -1,7 +1,13 @@
 import numpy as np
 import torch
 
-from hamiltonian_sph import HamiltonianNetConfig, IntegratorConfig, SPHConfig
+from hamiltonian_sph import (
+    ConservativeConfig,
+    CutoffConfig,
+    DissipationConfig,
+    IntegratorConfig,
+    SPHConfig,
+)
 from learned_simulator import BaseSimulator, get_simulator_class
 from train_config import Config, NUM_PARTICLE_TYPES
 
@@ -105,10 +111,68 @@ def _get_simulator(
                 return cls(**val)
             raise TypeError(f"{key} must be dict or {cls.__name__}")
 
+        def _sanitize_dict(val, allowed_keys: set[str], label: str):
+            if val is None or not isinstance(val, dict):
+                return val
+            filtered = {k: v for k, v in val.items() if k in allowed_keys}
+            dropped = [k for k in val if k not in allowed_keys]
+            if dropped:
+                print(
+                    f"[simulator_factory] hamiltonian_sph.{label}: 未使用キーを無視します: {', '.join(dropped)}"
+                )
+            return filtered
+
         method_options = method_options.copy()
+
+        # レガシー名称をマッピング
+        legacy_include = method_options.pop("include_external_potential", None)
+        if legacy_include is not None:
+            method_options["include_external_acceleration"] = bool(legacy_include)
+
+        method_options["sph"] = _sanitize_dict(
+            method_options.get("sph"),
+            allowed_keys={"smoothing_length", "max_num_neighbors"},
+            label="sph",
+        )
+        method_options["conservative"] = _sanitize_dict(
+            method_options.get("conservative"),
+            allowed_keys={"mlp_layers", "mlp_hidden_dim", "dropout", "phi_max_multiplier"},
+            label="conservative",
+        )
+        method_options["dissipation"] = _sanitize_dict(
+            method_options.get("dissipation"),
+            allowed_keys={"mlp_layers", "mlp_hidden_dim", "dropout", "alpha_max", "s_clip_scaled"},
+            label="dissipation",
+        )
+        method_options["cutoff"] = _sanitize_dict(
+            method_options.get("cutoff"), allowed_keys={"kind"}, label="cutoff"
+        )
+        method_options["integrator"] = _sanitize_dict(
+            method_options.get("integrator"), allowed_keys={"dt", "type"}, label="integrator"
+        )
+
         method_options["sph"] = _maybe(SPHConfig, "sph")
-        method_options["hamiltonian_net"] = _maybe(HamiltonianNetConfig, "hamiltonian_net")
+        method_options["conservative"] = _maybe(ConservativeConfig, "conservative")
+        method_options["dissipation"] = _maybe(DissipationConfig, "dissipation")
+        method_options["cutoff"] = _maybe(CutoffConfig, "cutoff")
         method_options["integrator"] = _maybe(IntegratorConfig, "integrator")
+
+        allowed_keys = {
+            "sph",
+            "conservative",
+            "dissipation",
+            "cutoff",
+            "integrator",
+            "particle_mass",
+            "gravity",
+            "pos_feature_scale",
+            "vel_feature_scale",
+            "include_external_acceleration",
+        }
+        unused_keys = [k for k in list(method_options.keys()) if k not in allowed_keys]
+        for key in unused_keys:
+            method_options.pop(key, None)
+            print(f"[simulator_factory] hamiltonian_sph: 未使用キーを無視します: {key}")
 
         # データセット側の時間刻み dt がメタデータに入っていれば、積分器に反映する。
         # （デフォルトの 1e-3 のままだと実データの 0.006 などと大きくずれて速度推定が跳ね、

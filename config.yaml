@@ -12,36 +12,30 @@ scenario_options:
 method: hamiltonian_sph
 method_options:
   hamiltonian_sph:
-    # SPH + Hamiltonian GNN バリアント設定
-    # データセットの rest_density と particle_spacing が分かっていれば
-    # 未指定でも自動推定されるが、明示指定したい場合は particle_mass を上書きする。
-    particle_mass: null
+    particle_mass: null            # 未指定ならメタデータから自動推定
     sph:
-      smoothing_length: null       # null で connectivity_radius を流用
-      rest_density: 1000.0
-      sound_speed: 10.0
-      gamma: 7.0
+      smoothing_length: null       # null なら connectivity_radius の 0.5 を使用
       max_num_neighbors: 128
-    hamiltonian_net:
-      variant: varA                # varA|varB|varC
-      latent_dim: 128
-      message_passing_steps: 4
+    conservative:
       mlp_layers: 2
       mlp_hidden_dim: 128
-      use_velocity_in_H: false
-      use_density_in_H: true
-      use_sph_features: false
-      node_dropout: 0.0
-      edge_dropout: 0.0
+      dropout: 0.0
+      phi_max_multiplier: 5.0
+    dissipation:
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      dropout: 0.0
+      alpha_max: 1.0
+      s_clip_scaled: 5.0
+    cutoff:
+      kind: cosine
     integrator:
       dt: 0.006
       type: leapfrog               # leapfrog|symplectic_euler
-    particle_mass: null
-    gravity: [0.0, -9.81]     # 2D データセットに合わせる
-    include_external_potential: true
+    gravity: [0.0, -9.81]          # 2D データセットに合わせる
+    include_external_acceleration: true
     pos_feature_scale: null        # null で半径を使用
-    vel_feature_scale: 1.0
-    rho_feature_scale: null        # null で rest_density を使用
+    vel_feature_scale: null        # null で pos_feature_scale/dt
 model_path: ./models/ # モデルやtrain_stateの保存先
 output_path: ./rollouts/
 output_filename: rollout

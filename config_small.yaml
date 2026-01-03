@@ -12,13 +12,30 @@ scenario_options:
 method: hamiltonian_sph
 method_options:
   hamiltonian_sph:
-    # 明示指定しない場合はメタデータから推定される
     particle_mass: null
     sph:
-      rest_density: 1000.0
+      smoothing_length: null
+      max_num_neighbors: 128
+    conservative:
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      dropout: 0.0
+      phi_max_multiplier: 5.0
+    dissipation:
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      dropout: 0.0
+      alpha_max: 1.0
+      s_clip_scaled: 5.0
+    cutoff:
+      kind: cosine
     integrator:
       dt: 0.006
+      type: leapfrog
     gravity: [0.0, -9.81]
+    include_external_acceleration: true
+    pos_feature_scale: null
+    vel_feature_scale: null
 model_path: ./models_small
 output_path: ./rollouts_small
 output_filename: rollout
