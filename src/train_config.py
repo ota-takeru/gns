@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,7 @@ class Config:
     noise: str = "random_walk"
     loss: str = "acceleration"
     log_interval: int = 10
+    max_grad_norm: float | None = 1.0
 
     ntraining_steps: int = int(2e7)
     validation_interval: int | None = None

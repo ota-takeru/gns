@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data.distributed import DistributedSampler
 
 import data_loader
@@ -314,6 +315,8 @@ def train(cfg: Config, device: torch.device):
         parameters = (
             simulator.module.parameters() if isinstance(simulator, DDP) else simulator.parameters()
         )
+        if cfg.max_grad_norm is not None and cfg.max_grad_norm > 0:
+            clip_grad_norm_(parameters, cfg.max_grad_norm)
         last_grad_norm = _compute_grad_norm(parameters)
 
         scaler.step(optimizer)

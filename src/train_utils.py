@@ -106,6 +106,7 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "batch_size": cfg.batch_size,
         "noise_std": cfg.noise_std,
         "log_interval": cfg.log_interval,
+        "max_grad_norm": cfg.max_grad_norm,
         "ntraining_steps": cfg.ntraining_steps,
         "validation_interval": cfg.validation_interval,
         "nsave_steps": cfg.nsave_steps,

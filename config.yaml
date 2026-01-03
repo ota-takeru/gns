@@ -30,7 +30,7 @@ method_options:
       mlp_hidden_dim: 128
       use_velocity_in_H: false
       use_density_in_H: true
-      use_sph_features: false
+      use_sph_features: true
       node_dropout: 0.0
       edge_dropout: 0.0
     integrator:
@@ -68,6 +68,7 @@ log_interval: 500 # 学習ログを出力するステップ間隔
 tensorboard_interval: 100 # TensorBoard に書き込むステップ間隔（null で log_interval と同じ）
 tensorboard_port: null # 自動割当
 tensorboard_host: null # 省略時は 127.0.0.1
+max_grad_norm: 1.0
 
 # 学習率（指数減衰）
 lr_init: 0.0001
