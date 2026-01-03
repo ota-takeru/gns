@@ -632,8 +632,9 @@ class HamiltonianSPHSimulator(BaseSimulator):
             particle_type_i=particle_type[i_idx],
             particle_type_j=particle_type[j_idx],
         )
-        # 解像度外挿に耐えるよう、ペア数で正規化する（平均）。
-        return u_pair.mean()
+        # 粒子あたりエネルギーに合わせて N で正規化し、近傍数変動によるスケール揺れを防ぐ。
+        n_particles = max(float(x.shape[0]), 1.0)
+        return u_pair.sum() / n_particles
 
     def _wall_potential_energy(self, x: torch.Tensor) -> torch.Tensor:
         """境界近傍で滑らかに反発するポテンシャルエネルギー U_wall を返す。"""
