@@ -23,7 +23,7 @@ method_options:
       gamma: 7.0
       max_num_neighbors: 128
     hamiltonian_net:
-      variant: varB                # varA|varB|varC
+      variant: varA                # varA|varB|varC
       latent_dim: 128
       message_passing_steps: 4
       mlp_layers: 2
