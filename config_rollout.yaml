@@ -27,7 +27,7 @@ method_options:
       mlp_hidden_dim: 128
       use_velocity_in_H: false
       use_density_in_H: true
-      use_sph_features: true
+      use_sph_features: false
       node_dropout: 0.0
       edge_dropout: 0.0
     integrator:
