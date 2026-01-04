@@ -40,8 +40,7 @@ model_path: ./models/ # モデルやtrain_stateの保存先
 output_path: ./rollouts/
 output_filename: rollout
 
-batch_size: 32
-noise_std: 0.0003
+batch_size: 48
 noise_std: 0.0
 noise: random_walk     # ノイズ生成の種類（デフォルト従来挙動）
 loss: acceleration     # ロス関数（デフォルト従来挙動）
@@ -64,6 +63,7 @@ tensorboard_interval: 100 # TensorBoard に書き込むステップ間隔（null
 tensorboard_port: null # 自動割当
 tensorboard_host: null # 省略時は 127.0.0.1
 max_grad_norm: 1.0
+warmup_steps: 2000
 
 # 学習率（指数減衰）
 lr_init: 0.00003
@@ -84,8 +84,7 @@ ddp_timeout_sec: 1800
 ddp_find_unused_parameters: true
 amp_enable: true
 amp_dtype: float16
-gradient_accumulation_steps: 1
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 3
 num_workers: 4
 persistent_workers: true
 pin_memory: true

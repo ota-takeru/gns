@@ -408,7 +408,12 @@ def train(cfg: Config, device: torch.device):
         micro_batch_count = 0
         steps_this_epoch += 1
 
-        lr_new = cfg.lr_init * (cfg.lr_decay ** (step / cfg.lr_decay_steps))
+        lr_base = cfg.lr_init * (cfg.lr_decay ** (step / cfg.lr_decay_steps))
+        if cfg.warmup_steps is not None and cfg.warmup_steps > 0:
+            warmup_scale = min(1.0, step / float(cfg.warmup_steps))
+        else:
+            warmup_scale = 1.0
+        lr_new = lr_base * warmup_scale
         for group in optimizer.param_groups:
             group["lr"] = lr_new
         current_lr = lr_new

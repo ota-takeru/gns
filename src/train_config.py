@@ -52,6 +52,7 @@ class Config:
     lr_init: float = 1e-4
     lr_decay: float = 0.1
     lr_decay_steps: int = int(5e6)
+    warmup_steps: int | None = 2000
 
     model_file: str | None = None  # "latest" (inference default) or ファイル名 or null
     train_state_file: str | None = "train_state.pt"  # "latest" or ファイル名 or null
