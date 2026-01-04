@@ -112,7 +112,7 @@ class WallConfig:
     dropout: float = 0.0
     a_wall_max_multiplier: float = 1.0  # a_wall_max = multiplier * (pos_scale / dt^2)
     d0_multiplier: float = 0.5  # d0 = multiplier * h
-    use_velocity_gate: bool = False  # default to distance-only gating for stability
+    use_velocity_gate: bool = True  # gate by velocity to avoid distance-only pushing
 
 
 @dataclass
@@ -251,6 +251,11 @@ class WallMagnitudeNet(nn.Module):
         raw = self._mlp(x).squeeze(-1)  # (N,)
         # shift raw so that initial output is almost zero
         base = self._a_wall_max * torch.sigmoid(raw - 6.0)  # (N,)
+
+        # Hard gate: if not moving toward the wall, zero the magnitude completely.
+        if self._use_velocity_gate:
+            gate = (v_toward > 0).to(base.dtype)
+            base = base * gate
 
         # near(d): exponential decay with d0 tied to h
         d0_t = torch.as_tensor(d0, device=d.device, dtype=d.dtype)
