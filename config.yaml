@@ -84,6 +84,7 @@ ddp_find_unused_parameters: true
 amp_enable: true
 amp_dtype: float16
 gradient_accumulation_steps: 1
+gradient_accumulation_steps: 2
 num_workers: 4
 persistent_workers: true
 pin_memory: true
