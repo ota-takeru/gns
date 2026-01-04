@@ -67,7 +67,7 @@ class ConservativeConfig:
     mlp_layers: int = 2
     mlp_hidden_dim: int = 128
     dropout: float = 0.0
-    phi_max_multiplier: float = 5.0  # phi_max = multiplier * (pos_scale / dt^2)
+    phi_max_multiplier: float = 2.0  # phi_max = multiplier * (pos_scale / dt^2)
 
 
 @dataclass
@@ -110,9 +110,9 @@ class WallConfig:
     mlp_layers: int = 2
     mlp_hidden_dim: int = 64
     dropout: float = 0.0
-    a_wall_max_multiplier: float = 5.0  # a_wall_max = multiplier * (pos_scale / dt^2)
+    a_wall_max_multiplier: float = 1.0  # a_wall_max = multiplier * (pos_scale / dt^2)
     d0_multiplier: float = 0.5  # d0 = multiplier * h
-    use_velocity_gate: bool = True  # use relu(v_toward) as input
+    use_velocity_gate: bool = False  # default to distance-only gating for stability
 
 
 @dataclass
@@ -777,9 +777,17 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         # --- Target in the SAME noisy world ---
         with torch.no_grad():
+            boundaries = self._boundaries.to(device=self._device, dtype=x.dtype)
+            lower, upper = boundaries[:, 0], boundaries[:, 1]
+
+            # clamp only for target generation to avoid out-of-box spikes caused by noise
+            x_clamped = torch.min(torch.max(x, lower), upper)
+            prev_for_target = noisy_seq[:, -2].to(self._device)
             next_noisy = (next_positions + position_sequence_noise[:, -1]).to(self._device)
-            v_next = next_noisy - noisy_seq[:, -1].to(self._device)
-            v_prev = noisy_seq[:, -1].to(self._device) - noisy_seq[:, -2].to(self._device)
+            next_clamped = torch.min(torch.max(next_noisy, lower), upper)
+
+            v_next = next_clamped - x_clamped
+            v_prev = x_clamped - prev_for_target
             target_acc = v_next - v_prev  # == a*dt^2
             target_normalized = (target_acc - acc_mean) / acc_std
 
