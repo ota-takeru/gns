@@ -68,7 +68,7 @@ class ConservativeConfig:
     mlp_hidden_dim: int = 128
     dropout: float = 0.0
     phi_max_multiplier: float = 2.0  # phi_max = multiplier * (pos_scale / dt^2)
-    use_density: bool = True  # optional density inputs (rho_avg, rho_diff)
+    use_density: bool = False  # optional density inputs (rho_avg, rho_diff)
 
 
 @dataclass
