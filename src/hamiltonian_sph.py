@@ -372,6 +372,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         else:
             self._gravity = None
         self._include_external_acceleration = bool(include_external_acceleration)
+        # 直近バッチの統計を取るかどうか（ログ用）。デフォルトで有効。
+        self._record_debug_stats = True
+        self._last_debug_stats: dict[str, float | None] | None = None
 
     # ------------------------------------------------------------
     # Graph construction
@@ -540,10 +543,13 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
     # ------------------------------------------------------------
     # Pair accelerations (instantaneous)
-    def _conservative_acc(self, *, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def _conservative_acc(
+        self, *, x: torch.Tensor, edge_index: torch.Tensor, collect_debug: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
         pairs = self._build_pairs(edge_index)
         if pairs is None:
-            return torch.zeros_like(x)
+            zero = torch.zeros_like(x)
+            return (zero, {"phi": None, "dist": None}) if collect_debug else zero
 
         i_idx, j_idx = pairs
         rel = x[j_idx] - x[i_idx]  # (P,dim)
@@ -557,14 +563,22 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         a = torch.zeros_like(x)
         a = a.index_add(0, i_idx, +delta)
         a = a.index_add(0, j_idx, -delta)
-        return a
+        if not collect_debug:
+            return a
+        return a, {"phi": w * phi, "dist": dist}
 
     def _dissipative_acc(
-        self, *, x: torch.Tensor, v: torch.Tensor, edge_index: torch.Tensor
-    ) -> torch.Tensor:
+        self,
+        *,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        edge_index: torch.Tensor,
+        collect_debug: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
         pairs = self._build_pairs(edge_index)
         if pairs is None:
-            return torch.zeros_like(v)
+            zero = torch.zeros_like(v)
+            return (zero, {"alpha": None, "dist": None}) if collect_debug else zero
 
         i_idx, j_idx = pairs
         rel = x[j_idx] - x[i_idx]
@@ -588,23 +602,95 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         a = torch.zeros_like(v)
         a = a.index_add(0, i_idx, +delta)
         a = a.index_add(0, j_idx, -delta)
-        return a
+        if not collect_debug:
+            return a
+        return a, {"alpha": alpha, "dist": dist}
 
     # ------------------------------------------------------------
     # Dynamics
     def _dynamics(
-        self, x: torch.Tensor, v: torch.Tensor, nparticles_per_example: torch.Tensor
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        nparticles_per_example: torch.Tensor,
+        *,
+        collect_debug: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         edge_index = self._build_edges(x, nparticles_per_example)
 
-        a = self._conservative_acc(x=x, edge_index=edge_index)
-        a = a + self._dissipative_acc(x=x, v=v, edge_index=edge_index)
-        a = a + self._wall_acc(x, v)
+        do_collect = self._record_debug_stats if collect_debug is None else collect_debug
+
+        cons_out = self._conservative_acc(
+            x=x, edge_index=edge_index, collect_debug=do_collect
+        )
+        if do_collect:
+            a_cons, cons_dbg = cons_out  # type: ignore[assignment]
+        else:
+            a_cons = cons_out  # type: ignore[assignment]
+            cons_dbg = {"phi": None, "dist": None}
+
+        diss_out = self._dissipative_acc(
+            x=x, v=v, edge_index=edge_index, collect_debug=do_collect
+        )
+        if do_collect:
+            a_diss, diss_dbg = diss_out  # type: ignore[assignment]
+        else:
+            a_diss = diss_out  # type: ignore[assignment]
+            diss_dbg = {"alpha": None, "dist": None}
+
+        a_wall = self._wall_acc(x, v)
+
+        a = a_cons + a_diss + a_wall
 
         if self._include_external_acceleration and self._gravity is not None:
             a = a + self._gravity.to(device=x.device, dtype=x.dtype)
 
+        if do_collect:
+            self._last_debug_stats = self._compute_debug_stats(
+                a_pair=a_cons + a_diss, a_wall=a_wall, cons_dbg=cons_dbg, diss_dbg=diss_dbg
+            )
+        else:
+            self._last_debug_stats = None
+
         return v, a  # xdot, vdot
+
+    def _compute_debug_stats(
+        self,
+        *,
+        a_pair: torch.Tensor,
+        a_wall: torch.Tensor,
+        cons_dbg: dict[str, torch.Tensor | None],
+        diss_dbg: dict[str, torch.Tensor | None],
+    ) -> dict[str, float | None]:
+        def _mean_and_max(t: torch.Tensor | None) -> tuple[float | None, float | None]:
+            if t is None or t.numel() == 0:
+                return None, None
+            t_det = t.detach()
+            return float(t_det.mean().item()), float(t_det.max().item())
+
+        stats: dict[str, float | None] = {}
+        # |a_pair|
+        pair_mag = torch.linalg.norm(a_pair.detach(), dim=-1) if a_pair.numel() > 0 else None
+        stats["a_pair_abs_mean"], stats["a_pair_abs_max"] = _mean_and_max(pair_mag)
+
+        # |a_wall|
+        wall_mag = torch.linalg.norm(a_wall.detach(), dim=-1) if a_wall.numel() > 0 else None
+        stats["a_wall_abs_mean"], stats["a_wall_abs_max"] = _mean_and_max(wall_mag)
+
+        # phi(dist) (cutoff を掛けたものの絶対値)
+        phi_vals = cons_dbg.get("phi") if cons_dbg is not None else None
+        phi_abs = phi_vals.detach().abs() if phi_vals is not None else None
+        stats["phi_mean"], stats["phi_max"] = _mean_and_max(phi_abs)
+
+        # alpha
+        alpha_vals = diss_dbg.get("alpha") if diss_dbg is not None else None
+        alpha_abs = alpha_vals.detach() if alpha_vals is not None else None
+        stats["alpha_mean"], stats["alpha_max"] = _mean_and_max(alpha_abs)
+
+        return stats
+
+    def get_last_debug_stats(self) -> dict[str, float | None] | None:
+        return self._last_debug_stats
 
     # ------------------------------------------------------------
     # Integrator (rollout only)

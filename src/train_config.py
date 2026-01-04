@@ -60,6 +60,7 @@ class Config:
     tensorboard_log_dir: str | None = None
     tensorboard_port: int | None = None
     tensorboard_host: str | None = None
+    log_file: str | None = None  # null なら model_path/train.log に追記
     seed: int = 42
     enable_ddp: bool = True
     ddp_backend: str = "nccl"

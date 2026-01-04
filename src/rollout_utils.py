@@ -173,7 +173,7 @@ def validation(
     feature_components: int,
     cfg: Config,
     device: torch.device,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dict[str, float | None]]:
     loss_fn = get_loss(cfg.loss)
     position = example[0][0].to(device)
     particle_type = example[0][1].to(device)
@@ -202,7 +202,55 @@ def validation(
             material_property=material_property,
         )
     loss = loss_fn(pred_acc, target_acc, non_kinematic_mask)
-    return loss
+    near_loss, away_loss = _split_validation_by_wall_distance(
+        position=position,
+        pred_acc=pred_acc,
+        target_acc=target_acc,
+        non_kinematic_mask=non_kinematic_mask,
+        simulator=simulator,
+    )
+    return loss, {"near": near_loss, "away": away_loss}
+
+
+def _split_validation_by_wall_distance(
+    *,
+    position: torch.Tensor,
+    pred_acc: torch.Tensor,
+    target_acc: torch.Tensor,
+    non_kinematic_mask: torch.Tensor,
+    simulator: BaseSimulator | DDP,
+) -> tuple[float | None, float | None]:
+    """壁との距離で validation 誤差を 2 分割して返す。粒子が存在しない場合は None。"""
+    core = simulator.module if isinstance(simulator, DDP) else simulator
+    boundaries = getattr(core, "_boundaries", None)
+    smoothing_length = getattr(getattr(core, "_sph", None), "smoothing_length", None)
+    if boundaries is None or smoothing_length is None:
+        return None, None
+
+    with torch.no_grad():
+        x_latest = position[:, -1]  # (N, dim)
+        boundaries_t = boundaries.to(device=position.device, dtype=position.dtype)
+        lower = boundaries_t[:, 0]
+        upper = boundaries_t[:, 1]
+        # 各粒子に対し最も近い壁までの距離
+        dist_lower = x_latest - lower
+        dist_upper = upper - x_latest
+        min_dist = torch.minimum(dist_lower, dist_upper).amin(dim=-1)  # (N,)
+
+        threshold = float(smoothing_length)
+        near_mask = (min_dist < threshold).bool()
+        away_mask = ~near_mask
+        near_mask = near_mask & non_kinematic_mask.bool()
+        away_mask = away_mask & non_kinematic_mask.bool()
+
+        err = (pred_acc - target_acc).pow(2).sum(dim=-1)  # (N,)
+
+        def _masked_mean(mask: torch.Tensor) -> float | None:
+            if mask is None or not bool(mask.any()):
+                return None
+            return float(err[mask].mean().item())
+
+        return _masked_mean(near_mask), _masked_mean(away_mask)
 
 
 __all__ = ["RolloutEvaluator", "rollout", "validation"]
