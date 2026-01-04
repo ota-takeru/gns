@@ -42,6 +42,7 @@ output_filename: rollout
 
 batch_size: 32
 noise_std: 0.0003
+noise_std: 0.0
 noise: random_walk     # ノイズ生成の種類（デフォルト従来挙動）
 loss: acceleration     # ロス関数（デフォルト従来挙動）
 

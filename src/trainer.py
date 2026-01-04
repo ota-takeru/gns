@@ -7,6 +7,12 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data.distributed import DistributedSampler
+try:  # GPU利用率取得用（存在しなければ無視）
+    import pynvml
+
+    _NVML_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    _NVML_AVAILABLE = False
 
 import data_loader
 import noise_utils
@@ -75,6 +81,41 @@ def train(cfg: Config, device: torch.device):
     accum_steps = max(1, int(cfg.gradient_accumulation_steps))
     if accum_steps < 1:
         raise ValueError("gradient_accumulation_steps must be >= 1")
+
+    # GPU使用率・メモリを監視する（主プロセスのみ）
+    gpu_monitor_enabled = False
+    gpu_handle = None
+    gpu_mem_total_mb: float | None = None
+
+    def _init_gpu_monitor() -> None:
+        nonlocal gpu_monitor_enabled, gpu_handle, gpu_mem_total_mb
+        if not _NVML_AVAILABLE or device.type != "cuda":
+            return
+        try:
+            pynvml.nvmlInit()
+            gpu_idx = torch.cuda.current_device()
+            gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(int(gpu_idx))
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
+            gpu_mem_total_mb = mem_info.total / (1024**2)
+            gpu_monitor_enabled = True
+        except Exception:
+            gpu_monitor_enabled = False
+            gpu_handle = None
+            gpu_mem_total_mb = None
+
+    def _get_gpu_stats():
+        if not gpu_monitor_enabled or gpu_handle is None:
+            return None
+        try:
+            util = pynvml.nvmlDeviceGetUtilizationRates(gpu_handle).gpu  # %
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(gpu_handle)
+            mem_used_mb = mem_info.used / (1024**2)
+            return util, mem_used_mb
+        except Exception:
+            return None
+
+    if is_main_process:
+        _init_gpu_monitor()
 
     _set_seed(cfg.seed + cfg.rank)
 
@@ -476,6 +517,11 @@ def train(cfg: Config, device: torch.device):
                 f"loss={train_loss:.6f}",
                 f"lr={current_lr:.6e}",
             ]
+            gpu_log = _get_gpu_stats()
+            if gpu_log is not None and gpu_mem_total_mb is not None:
+                gpu_util, gpu_mem_used = gpu_log
+                log_parts.append(f"gpu={gpu_util:.0f}%")
+                log_parts.append(f"mem={gpu_mem_used:.0f}/{gpu_mem_total_mb:.0f}MB")
             if last_grad_norm_pre_clip is not None and last_grad_norm is not None:
                 log_parts.append(
                     f"grad_norm={last_grad_norm_pre_clip:.4f}->{last_grad_norm:.4f}"
@@ -522,6 +568,13 @@ def train(cfg: Config, device: torch.device):
         if is_main_process and tb_writer is not None and step % tensorboard_interval == 0:
             tb_writer.add_scalar("train/loss", train_loss, step)
             tb_writer.add_scalar("train/lr", current_lr, step)
+            gpu_tb = _get_gpu_stats()
+            if gpu_tb is not None:
+                util, mem_used = gpu_tb
+                tb_writer.add_scalar("system/gpu_util", float(util), step)
+                tb_writer.add_scalar("system/gpu_mem_used_mb", float(mem_used), step)
+                if gpu_mem_total_mb is not None:
+                    tb_writer.add_scalar("system/gpu_mem_total_mb", float(gpu_mem_total_mb), step)
             if last_grad_norm_pre_clip is not None:
                 tb_writer.add_scalar("train/grad_norm_pre_clip", last_grad_norm_pre_clip, step)
             if last_grad_norm is not None:
@@ -738,6 +791,11 @@ def train(cfg: Config, device: torch.device):
                     log_fp.close()
                 except Exception:
                     pass
+        if gpu_monitor_enabled:
+            try:  # pragma: no cover - best effort cleanup
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
         if distributed:
             _cleanup_distributed()
 
