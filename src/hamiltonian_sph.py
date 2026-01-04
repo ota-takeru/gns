@@ -68,6 +68,7 @@ class ConservativeConfig:
     mlp_hidden_dim: int = 128
     dropout: float = 0.0
     phi_max_multiplier: float = 2.0  # phi_max = multiplier * (pos_scale / dt^2)
+    use_density: bool = False  # optional density inputs (rho_avg, rho_diff)
 
 
 @dataclass
@@ -165,6 +166,54 @@ class PairConservativePhiNetDistOnly(nn.Module):
         x = self._drop(x)
         raw = self._mlp(x).squeeze(-1)  # (P,)
         return self._phi_max * torch.tanh(raw)  # bounded accel magnitude
+
+
+class PairConservativePhiNetWithDensity(nn.Module):
+    """phi = f(dist, rho_avg, rho_diff) -> scalar (accel magnitude along r_hat)
+
+    rho inputs are expected to be pre-scaled (e.g., divide by rho0).
+    """
+
+    def __init__(
+        self,
+        cfg: ConservativeConfig,
+        *,
+        pos_scale: float,
+        dt: float,
+        typical_acc: float | None = None,
+    ) -> None:
+        super().__init__()
+        self._pos_scale = float(pos_scale)
+        self._dt = float(dt)
+        self._drop = nn.Dropout(cfg.dropout)
+
+        a_typ = float(typical_acc) if typical_acc is not None else (
+            self._pos_scale / max(self._dt * self._dt, 1e-12)
+        )
+        self._phi_max = float(cfg.phi_max_multiplier) * a_typ
+
+        self._mlp = graph_network.build_mlp(
+            input_size=3,  # [d_scaled, rho_avg_scaled, rho_diff_scaled]
+            hidden_layer_sizes=[cfg.mlp_hidden_dim for _ in range(cfg.mlp_layers)],
+            output_size=1,
+            activation=nn.SiLU,
+            output_activation=nn.Identity,
+        )
+
+    def forward(
+        self,
+        *,
+        dist: torch.Tensor,
+        rho_avg_scaled: torch.Tensor,
+        rho_diff_scaled: torch.Tensor,
+    ) -> torch.Tensor:
+        d_scaled = (dist / self._pos_scale).unsqueeze(-1)  # (P,1)
+        rho_avg_scaled = rho_avg_scaled.unsqueeze(-1)
+        rho_diff_scaled = rho_diff_scaled.unsqueeze(-1)
+        x = torch.cat([d_scaled, rho_avg_scaled, rho_diff_scaled], dim=-1)  # (P,3)
+        x = self._drop(x)
+        raw = self._mlp(x).squeeze(-1)  # (P,)
+        return self._phi_max * torch.tanh(raw)
 
 
 class PairDissipationAlphaNet(nn.Module):
@@ -358,6 +407,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             DissipationConfig(mlp_layers=nmlp_layers, mlp_hidden_dim=mlp_hidden_dim, dropout=0.0),
         )
         self._wall_cfg = _coerce(wall, WallConfig, WallConfig())
+        self._use_density = bool(getattr(self._cons_cfg, "use_density", False))
 
         # Scales for stable feature scaling
         self._pos_scale = float(pos_feature_scale or (2.0 * float(self._sph.smoothing_length)))
@@ -374,12 +424,20 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
                 self._vel_scale = float(self._pos_scale / max(self._dt, 1e-8))
 
         # Pair nets
-        self._phi_net = PairConservativePhiNetDistOnly(
-            cfg=self._cons_cfg,
-            pos_scale=self._pos_scale,
-            dt=self._dt,
-            typical_acc=self._typical_acc if self._typical_acc > 0 else None,
-        ).to(self._device)
+        if self._use_density:
+            self._phi_net = PairConservativePhiNetWithDensity(
+                cfg=self._cons_cfg,
+                pos_scale=self._pos_scale,
+                dt=self._dt,
+                typical_acc=self._typical_acc if self._typical_acc > 0 else None,
+            ).to(self._device)
+        else:
+            self._phi_net = PairConservativePhiNetDistOnly(
+                cfg=self._cons_cfg,
+                pos_scale=self._pos_scale,
+                dt=self._dt,
+                typical_acc=self._typical_acc if self._typical_acc > 0 else None,
+            ).to(self._device)
 
         self._alpha_net = PairDissipationAlphaNet(
             cfg=self._diss_cfg,
@@ -418,6 +476,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         self._last_debug_stats: dict[str, float | None] | None = None
         self._neighbor_debug_logged: bool = False
         self._neighbor_debug_info: dict[str, str | bool] | None = None
+        # proxy density scale (EMA of mean rho)
+        self.register_buffer("_rho_ema", torch.tensor(1.0, dtype=torch.float32), persistent=False)
 
     # ------------------------------------------------------------
     # Graph construction
@@ -550,6 +610,36 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         pairs = torch.unique(pairs, dim=0)
         return pairs[:, 0], pairs[:, 1]
 
+    def _pair_geometry(
+        self, x: torch.Tensor, edge_index: torch.Tensor
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ] | None:
+        """Compute pair-wise rel/dist/r_hat and cutoff weight."""
+        pairs = self._build_pairs(edge_index)
+        if pairs is None:
+            return None
+        i_idx, j_idx = pairs
+        rel = x[j_idx] - x[i_idx]  # (P,dim)
+        dist = torch.sqrt((rel * rel).sum(dim=-1) + 1e-12)  # (P,)
+        r_hat = rel / (dist.unsqueeze(-1) + 1e-8)  # (P,dim)
+        w = self._cutoff_weight(dist)
+        return (i_idx, j_idx), rel, dist, r_hat, w
+
+    def _proxy_density(
+        self, *, pairs: tuple[torch.Tensor, torch.Tensor], w: torch.Tensor, num_nodes: int
+    ) -> torch.Tensor:
+        """ρ_i = Σ_j w(d_ij) using cutoff weights (proxy density)."""
+        rho = torch.zeros(num_nodes, device=w.device, dtype=w.dtype)
+        i_idx, j_idx = pairs
+        rho = rho.index_add(0, i_idx, w)
+        rho = rho.index_add(0, j_idx, w)
+        return rho
+
     # ------------------------------------------------------------
     # Smooth cutoff for pair terms
     def _cutoff_weight(self, dist: torch.Tensor) -> torch.Tensor:
@@ -627,20 +717,49 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
     # ------------------------------------------------------------
     # Pair accelerations (instantaneous)
     def _conservative_acc(
-        self, *, x: torch.Tensor, edge_index: torch.Tensor, collect_debug: bool = False
+        self,
+        *,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        collect_debug: bool = False,
+        pair_geom: tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+        | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
-        pairs = self._build_pairs(edge_index)
-        if pairs is None:
+        geom = pair_geom if pair_geom is not None else self._pair_geometry(x, edge_index)
+        if geom is None:
             zero = torch.zeros_like(x)
-            return (zero, {"phi": None, "dist": None}) if collect_debug else zero
+            return (zero, {"phi": None, "dist": None, "rho": None}) if collect_debug else zero
 
+        pairs, rel, dist, r_hat, w = geom
         i_idx, j_idx = pairs
-        rel = x[j_idx] - x[i_idx]  # (P,dim)
-        dist = torch.sqrt((rel * rel).sum(dim=-1) + 1e-12)  # (P,)
-        r_hat = rel / (dist.unsqueeze(-1) + 1e-8)  # (P,dim)
 
-        w = self._cutoff_weight(dist)
-        phi = self._phi_net(dist=dist)  # accel magnitude
+        rho: torch.Tensor | None
+        rho_scale: torch.Tensor | None
+        if self._use_density:
+            rho = self._proxy_density(pairs=pairs, w=w, num_nodes=x.shape[0])
+            # update EMA during training (detach to avoid grads)
+            rho_mean = rho.detach().mean()
+            decay = 0.99
+            if self.training:
+                self._rho_ema.mul_(decay).add_((1.0 - decay) * rho_mean)
+            rho_scale = torch.clamp(self._rho_ema.to(rho.device, rho.dtype), min=1e-6)
+            rho_avg = 0.5 * (rho[i_idx] + rho[j_idx])
+            rho_diff = torch.abs(rho[i_idx] - rho[j_idx])
+            rho_avg_scaled = rho_avg / rho_scale
+            rho_diff_scaled = rho_diff / rho_scale
+            phi = self._phi_net(
+                dist=dist, rho_avg_scaled=rho_avg_scaled, rho_diff_scaled=rho_diff_scaled
+            )
+        else:
+            rho = None
+            rho_scale = None
+            phi = self._phi_net(dist=dist)  # accel magnitude
         delta = (w * phi).unsqueeze(-1) * r_hat  # (P,dim)
 
         a = torch.zeros_like(x)
@@ -648,7 +767,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         a = a.index_add(0, j_idx, -delta)
         if not collect_debug:
             return a
-        return a, {"phi": w * phi, "dist": dist}
+        return a, {"phi": w * phi, "dist": dist, "rho": rho, "rho_scale": rho_scale}
 
     def _dissipative_acc(
         self,
@@ -657,16 +776,22 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         v: torch.Tensor,
         edge_index: torch.Tensor,
         collect_debug: bool = False,
+        pair_geom: tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+        | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
-        pairs = self._build_pairs(edge_index)
-        if pairs is None:
+        geom = pair_geom if pair_geom is not None else self._pair_geometry(x, edge_index)
+        if geom is None:
             zero = torch.zeros_like(v)
             return (zero, {"alpha": None, "dist": None}) if collect_debug else zero
 
+        pairs, rel, dist, r_hat, _ = geom
         i_idx, j_idx = pairs
-        rel = x[j_idx] - x[i_idx]
-        dist = torch.sqrt((rel * rel).sum(dim=-1) + 1e-12)
-        r_hat = rel / (dist.unsqueeze(-1) + 1e-8)
 
         v_rel = v[j_idx] - v[i_idx]
         s = (v_rel * r_hat).sum(dim=-1)  # radial relative speed
@@ -700,20 +825,21 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         collect_debug: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         edge_index = self._build_edges(x, nparticles_per_example)
+        pair_geom = self._pair_geometry(x, edge_index)
 
         do_collect = self._record_debug_stats if collect_debug is None else collect_debug
 
         cons_out = self._conservative_acc(
-            x=x, edge_index=edge_index, collect_debug=do_collect
+            x=x, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
         )
         if do_collect:
             a_cons, cons_dbg = cons_out  # type: ignore[assignment]
         else:
             a_cons = cons_out  # type: ignore[assignment]
-            cons_dbg = {"phi": None, "dist": None}
+            cons_dbg = {"phi": None, "dist": None, "rho": None, "rho_scale": None}
 
         diss_out = self._dissipative_acc(
-            x=x, v=v, edge_index=edge_index, collect_debug=do_collect
+            x=x, v=v, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
         )
         if do_collect:
             a_diss, diss_dbg = diss_out  # type: ignore[assignment]
@@ -730,7 +856,12 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         if do_collect:
             self._last_debug_stats = self._compute_debug_stats(
-                a_pair=a_cons + a_diss, a_wall=a_wall, cons_dbg=cons_dbg, diss_dbg=diss_dbg
+                a_pair=a_cons + a_diss,
+                a_wall=a_wall,
+                cons_dbg=cons_dbg,
+                diss_dbg=diss_dbg,
+                rho=cons_dbg.get("rho"),
+                x=x,
             )
         else:
             self._last_debug_stats = None
@@ -744,6 +875,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         a_wall: torch.Tensor,
         cons_dbg: dict[str, torch.Tensor | None],
         diss_dbg: dict[str, torch.Tensor | None],
+        rho: torch.Tensor | None,
+        x: torch.Tensor | None,
     ) -> dict[str, float | None]:
         def _mean_and_max(t: torch.Tensor | None) -> tuple[float | None, float | None]:
             if t is None or t.numel() == 0:
@@ -769,6 +902,39 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         alpha_vals = diss_dbg.get("alpha") if diss_dbg is not None else None
         alpha_abs = alpha_vals.detach() if alpha_vals is not None else None
         stats["alpha_mean"], stats["alpha_max"] = _mean_and_max(alpha_abs)
+
+        # proxy density stats (optional)
+        if rho is not None and rho.numel() > 0 and x is not None:
+            rho_det = rho.detach()
+            stats["rho_mean"], stats["rho_max"] = _mean_and_max(rho_det)
+            stats["rho_std"] = float(rho_det.std().item())
+            stats["rho_min"] = float(rho_det.min().item())
+
+            # near/away split by wall distance (threshold = smoothing_length)
+            boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
+            lower = boundaries[:, 0]
+            upper = boundaries[:, 1]
+            dist_lower = x - lower
+            dist_upper = upper - x
+            min_dist = torch.minimum(dist_lower, dist_upper).amin(dim=-1)  # (N,)
+            threshold = float(self._sph.smoothing_length)
+            near_mask = (min_dist < threshold).bool()
+            away_mask = ~near_mask
+
+            def _masked_mean(t: torch.Tensor, mask: torch.Tensor) -> float | None:
+                if not bool(mask.any()):
+                    return None
+                return float(t[mask].mean().item())
+
+            stats["rho_near_mean"] = _masked_mean(rho_det, near_mask)
+            stats["rho_away_mean"] = _masked_mean(rho_det, away_mask)
+        else:
+            stats["rho_mean"] = None
+            stats["rho_max"] = None
+            stats["rho_std"] = None
+            stats["rho_min"] = None
+            stats["rho_near_mean"] = None
+            stats["rho_away_mean"] = None
 
         return stats
 
@@ -893,6 +1059,7 @@ __all__ = [
     "CutoffConfig",
     "IntegratorConfig",
     "PairConservativePhiNetDistOnly",
+    "PairConservativePhiNetWithDensity",
     "PairDissipationAlphaNet",
     "WallMagnitudeNet",
     "HamiltonianSPHVarAWithDissipation",

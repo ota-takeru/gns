@@ -137,7 +137,13 @@ def _get_simulator(
         )
         method_options["conservative"] = _sanitize_dict(
             method_options.get("conservative"),
-            allowed_keys={"mlp_layers", "mlp_hidden_dim", "dropout", "phi_max_multiplier"},
+            allowed_keys={
+                "mlp_layers",
+                "mlp_hidden_dim",
+                "dropout",
+                "phi_max_multiplier",
+                "use_density",
+            },
             label="conservative",
         )
         method_options["dissipation"] = _sanitize_dict(
