@@ -14,7 +14,8 @@ method_options:
   hamiltonian_sph:
     particle_mass: null            # 未指定ならメタデータから自動推定
     sph:
-      smoothing_length: null       # null なら connectivity_radius の 0.5 を使用
+      # 学習設定と揃えて近傍数を ~20 に増やす
+      smoothing_length: 0.16       # 2*h がカットオフ半径（約0.32）
       max_num_neighbors: 128
     conservative:
       mlp_layers: 2
