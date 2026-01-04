@@ -68,7 +68,7 @@ class ConservativeConfig:
     mlp_hidden_dim: int = 128
     dropout: float = 0.0
     phi_max_multiplier: float = 2.0  # phi_max = multiplier * (pos_scale / dt^2)
-    use_density: bool = False  # optional density inputs (rho_avg, rho_diff)
+    use_density: bool = True  # optional density inputs (rho_avg, rho_diff)
 
 
 @dataclass
@@ -148,8 +148,10 @@ class PairConservativePhiNetDistOnly(nn.Module):
         self._drop = nn.Dropout(cfg.dropout)
 
         # acceleration scale ~ typ acc (fallback: pos/dt^2)
-        a_typ = float(typical_acc) if typical_acc is not None else (
-            self._pos_scale / max(self._dt * self._dt, 1e-12)
+        a_typ = (
+            float(typical_acc)
+            if typical_acc is not None
+            else (self._pos_scale / max(self._dt * self._dt, 1e-12))
         )
         self._phi_max = float(cfg.phi_max_multiplier) * a_typ
 
@@ -187,8 +189,10 @@ class PairConservativePhiNetWithDensity(nn.Module):
         self._dt = float(dt)
         self._drop = nn.Dropout(cfg.dropout)
 
-        a_typ = float(typical_acc) if typical_acc is not None else (
-            self._pos_scale / max(self._dt * self._dt, 1e-12)
+        a_typ = (
+            float(typical_acc)
+            if typical_acc is not None
+            else (self._pos_scale / max(self._dt * self._dt, 1e-12))
         )
         self._phi_max = float(cfg.phi_max_multiplier) * a_typ
 
@@ -273,8 +277,10 @@ class WallMagnitudeNet(nn.Module):
         self._dt = float(dt)
         self._drop = nn.Dropout(cfg.dropout)
 
-        a_typ = float(typical_acc) if typical_acc is not None else (
-            self._pos_scale / max(self._dt * self._dt, 1e-12)
+        a_typ = (
+            float(typical_acc)
+            if typical_acc is not None
+            else (self._pos_scale / max(self._dt * self._dt, 1e-12))
         )
         self._a_wall_max = float(cfg.a_wall_max_multiplier) * a_typ
         self._use_velocity_gate = bool(cfg.use_velocity_gate)
@@ -612,13 +618,16 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
     def _pair_geometry(
         self, x: torch.Tensor, edge_index: torch.Tensor
-    ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor],
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ] | None:
+    ) -> (
+        tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+        | None
+    ):
         """Compute pair-wise rel/dist/r_hat and cutoff weight."""
         pairs = self._build_pairs(edge_index)
         if pairs is None:
@@ -1052,16 +1061,16 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 HamiltonianSPHSimulator = HamiltonianSPHVarAWithDissipation
 
 __all__ = [
-    "SPHConfig",
     "ConservativeConfig",
-    "DissipationConfig",
-    "WallConfig",
     "CutoffConfig",
+    "DissipationConfig",
+    "HamiltonianSPHSimulator",
+    "HamiltonianSPHVarAWithDissipation",
     "IntegratorConfig",
     "PairConservativePhiNetDistOnly",
     "PairConservativePhiNetWithDensity",
     "PairDissipationAlphaNet",
+    "SPHConfig",
+    "WallConfig",
     "WallMagnitudeNet",
-    "HamiltonianSPHVarAWithDissipation",
-    "HamiltonianSPHSimulator",
 ]

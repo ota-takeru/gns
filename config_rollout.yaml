@@ -22,6 +22,7 @@ method_options:
       mlp_hidden_dim: 128
       dropout: 0.0
       phi_max_multiplier: 2.0
+      use_density: true
     dissipation:
       mlp_layers: 2
       mlp_hidden_dim: 128
