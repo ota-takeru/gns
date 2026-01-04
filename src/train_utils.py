@@ -177,7 +177,14 @@ def _is_distributed_env(cfg: Config) -> bool:
     if not cfg.enable_ddp or not dist.is_available():
         return False
     required_env = {"RANK", "WORLD_SIZE", "LOCAL_RANK"}
-    return required_env.issubset(os.environ.keys())
+    if not required_env.issubset(os.environ.keys()):
+        return False
+    # torchrun --nproc_per_node=1 などで WORLD_SIZE=1 の場合は DDP を無効化して余計なオーバーヘッドを避ける
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError:
+        world_size = 1
+    return world_size > 1
 
 
 def _init_distributed(cfg: Config) -> tuple[bool, int, int, int]:

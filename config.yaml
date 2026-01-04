@@ -32,7 +32,7 @@ method_options:
       kind: cosine
     integrator:
       dt: 0.006
-      type: symplectic_euler               # leapfrog|symplectic_euler
+      type: leapfrog               # leapfrog|symplectic_euler
     gravity: [0.0, -9.81]          # 2D データセットに合わせる
     include_external_acceleration: true
     pos_feature_scale: null        # null で半径を使用

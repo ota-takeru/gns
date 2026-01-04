@@ -411,6 +411,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         # 直近バッチの統計を取るかどうか（ログ用）。デフォルトで有効。
         self._record_debug_stats = True
         self._last_debug_stats: dict[str, float | None] | None = None
+        self._neighbor_debug_logged: bool = False
+        self._neighbor_debug_info: dict[str, str | bool] | None = None
 
     # ------------------------------------------------------------
     # Graph construction
@@ -426,6 +428,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         batch_ids = torch.repeat_interleave(
             torch.arange(len(counts), device=node_position.device), counts
         )
+        backend = "radius_graph"
+        backend_note: str | None = None
         try:
             edge_index = radius_graph(
                 node_position,
@@ -434,10 +438,18 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
                 loop=add_self_edges,
                 max_num_neighbors=self._sph.max_num_neighbors,
             )
-        except (ImportError, RuntimeError):
+        except (ImportError, RuntimeError) as e:
+            backend = "dense_radius_graph"
+            backend_note = f"{type(e).__name__}: {e}"
             edge_index = self._dense_radius_graph(
                 node_position, nparticles_per_example, radius, add_self_edges
             )
+        self._log_neighbor_backend(
+            backend=backend,
+            node_position=node_position,
+            batch_device=batch_ids.device,
+            note=backend_note,
+        )
         return edge_index
 
     def _dense_radius_graph(
@@ -473,6 +485,36 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         if not edges:
             return torch.empty((2, 0), dtype=torch.long, device=device)
         return torch.cat(edges, dim=1)
+
+    def _log_neighbor_backend(
+        self,
+        *,
+        backend: str,
+        node_position: torch.Tensor,
+        batch_device: torch.device,
+        note: str | None,
+    ) -> None:
+        """Log once whether neighbor search runs on GPU or CPU."""
+        if self._neighbor_debug_logged:
+            return
+        uses_gpu = node_position.is_cuda
+        info: dict[str, str | bool] = {
+            "backend": backend,
+            "node_device": str(node_position.device),
+            "batch_device": str(batch_device),
+            "uses_gpu": uses_gpu,
+            "torch_cuda_available": torch.cuda.is_available(),
+        }
+        if note:
+            info["note"] = str(note).replace("\n", " ")
+        self._neighbor_debug_info = info
+        parts = [f"{k}={v}" for k, v in info.items()]
+        print("[neighbor][HamiltonianSPH]", " ".join(parts))
+        self._neighbor_debug_logged = True
+
+    def get_neighbor_debug_info(self) -> dict[str, str | bool] | None:
+        """Return cached neighbor-search device info (first call only)."""
+        return self._neighbor_debug_info
 
     def _build_edges(self, x: torch.Tensor, nparticles_per_example: torch.Tensor) -> torch.Tensor:
         rc = 2.0 * float(self._sph.smoothing_length)

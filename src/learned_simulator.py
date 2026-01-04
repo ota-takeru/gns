@@ -102,6 +102,8 @@ class GNSSimulator(BaseSimulator):
         self._boundaries = boundaries_arr
         self._boundary_clamp_limit = boundary_clamp_limit
         self._device = device
+        self._neighbor_debug_logged = False
+        self._neighbor_debug_info = None
 
     def forward(
         self,
@@ -136,6 +138,8 @@ class GNSSimulator(BaseSimulator):
                 for i, n in enumerate(nparticles_per_example.tolist())
             ]
         ).to(self._device)
+        backend = "radius_graph"
+        backend_note = None
         try:
             edge_index = radius_graph(
                 node_position,
@@ -146,10 +150,18 @@ class GNSSimulator(BaseSimulator):
             )
             receivers = edge_index[0, :]
             senders = edge_index[1, :]
-        except ImportError:
+        except (ImportError, RuntimeError) as e:
+            backend = "dense_radius_graph"
+            backend_note = f"{type(e).__name__}: {e}"
             receivers, senders = self._dense_radius_graph(
                 node_position, nparticles_per_example, radius, add_self_edges
             )
+        self._log_neighbor_backend(
+            backend=backend,
+            node_position=node_position,
+            batch_device=batch_ids.device,
+            note=backend_note,
+        )
         return receivers, senders
 
     def _dense_radius_graph(
@@ -188,6 +200,36 @@ class GNSSimulator(BaseSimulator):
             receivers_cat = torch.empty(0, dtype=torch.long, device=device)
             senders_cat = torch.empty(0, dtype=torch.long, device=device)
         return receivers_cat, senders_cat
+
+    def _log_neighbor_backend(
+        self,
+        *,
+        backend: str,
+        node_position: torch.Tensor,
+        batch_device: torch.device,
+        note: str | None,
+    ) -> None:
+        """Log once whether neighbor search runs on GPU or CPU."""
+        if self._neighbor_debug_logged:
+            return
+        uses_gpu = node_position.is_cuda
+        info = {
+            "backend": backend,
+            "node_device": str(node_position.device),
+            "batch_device": str(batch_device),
+            "uses_gpu": uses_gpu,
+            "torch_cuda_available": torch.cuda.is_available(),
+        }
+        if note:
+            info["note"] = str(note).replace("\n", " ")
+        self._neighbor_debug_info = info
+        parts = [f"{k}={v}" for k, v in info.items()]
+        print("[neighbor][GNS]", " ".join(parts))
+        self._neighbor_debug_logged = True
+
+    def get_neighbor_debug_info(self):
+        """Return cached neighbor-search device info (first call only)."""
+        return self._neighbor_debug_info
 
     def _encoder_preprocessor(
         self,
