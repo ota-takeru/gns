@@ -133,16 +133,24 @@ class IntegratorConfig:
 class PairConservativePhiNetDistOnly(nn.Module):
     """phi = f(dist) -> scalar (acceleration magnitude along r_hat)"""
 
-    def __init__(self, cfg: ConservativeConfig, *, pos_scale: float, dt: float) -> None:
+    def __init__(
+        self,
+        cfg: ConservativeConfig,
+        *,
+        pos_scale: float,
+        dt: float,
+        typical_acc: float | None = None,
+    ) -> None:
         super().__init__()
         self._pos_scale = float(pos_scale)
         self._dt = float(dt)
         self._drop = nn.Dropout(cfg.dropout)
 
-        # acceleration scale ~ pos / dt^2
-        self._phi_max = float(cfg.phi_max_multiplier) * (
+        # acceleration scale ~ typ acc (fallback: pos/dt^2)
+        a_typ = float(typical_acc) if typical_acc is not None else (
             self._pos_scale / max(self._dt * self._dt, 1e-12)
         )
+        self._phi_max = float(cfg.phi_max_multiplier) * a_typ
 
         self._mlp = graph_network.build_mlp(
             input_size=1,
@@ -201,16 +209,25 @@ class WallMagnitudeNet(nn.Module):
       v_scaled = v_toward / vel_scale
     """
 
-    def __init__(self, cfg: WallConfig, *, pos_scale: float, vel_scale: float, dt: float) -> None:
+    def __init__(
+        self,
+        cfg: WallConfig,
+        *,
+        pos_scale: float,
+        vel_scale: float,
+        dt: float,
+        typical_acc: float | None = None,
+    ) -> None:
         super().__init__()
         self._pos_scale = float(pos_scale)
         self._vel_scale = float(vel_scale)
         self._dt = float(dt)
         self._drop = nn.Dropout(cfg.dropout)
 
-        self._a_wall_max = float(cfg.a_wall_max_multiplier) * (
+        a_typ = float(typical_acc) if typical_acc is not None else (
             self._pos_scale / max(self._dt * self._dt, 1e-12)
         )
+        self._a_wall_max = float(cfg.a_wall_max_multiplier) * a_typ
         self._use_velocity_gate = bool(cfg.use_velocity_gate)
 
         self._mlp = graph_network.build_mlp(
@@ -227,12 +244,13 @@ class WallMagnitudeNet(nn.Module):
         if self._use_velocity_gate:
             v_scaled = v_toward / (self._vel_scale + 1e-12)
         else:
-            v_scaled = v_toward / (self._vel_scale + 1e-12)
+            v_scaled = torch.zeros_like(v_toward)
 
         x = torch.stack([d_scaled, v_scaled], dim=-1)  # (N,2)
         x = self._drop(x)
         raw = self._mlp(x).squeeze(-1)  # (N,)
-        base = self._a_wall_max * torch.sigmoid(raw)  # (N,)
+        # shift raw so that initial output is almost zero
+        base = self._a_wall_max * torch.sigmoid(raw - 6.0)  # (N,)
 
         # near(d): exponential decay with d0 tied to h
         d0_t = torch.as_tensor(d0, device=d.device, dtype=d.dtype)
@@ -314,6 +332,12 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         self._cut_cfg = _coerce(cutoff, CutoffConfig, CutoffConfig())
         self._dt = float(self._int_cfg.dt)
 
+        # データ統計に合わせた代表加速度／速度スケールを推定
+        acc_stats = normalization_stats.get("acceleration", {})
+        acc_std = torch.as_tensor(acc_stats.get("std", 0.0), dtype=torch.float32)
+        acc_std_max = float(acc_std.abs().max().item()) if acc_std.numel() > 0 else 0.0
+        self._typical_acc = acc_std_max / max(self._dt * self._dt, 1e-12)
+
         if self._sph.smoothing_length is None:
             # set so that cutoff radius ~= 2h
             self._sph.smoothing_length = self._connectivity_radius * 0.5
@@ -332,13 +356,24 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         # Scales for stable feature scaling
         self._pos_scale = float(pos_feature_scale or (2.0 * float(self._sph.smoothing_length)))
-        self._vel_scale = float(vel_feature_scale or (self._pos_scale / max(self._dt, 1e-8)))
+
+        if vel_feature_scale is not None:
+            self._vel_scale = float(vel_feature_scale)
+        else:
+            vel_stats = normalization_stats.get("velocity", {})
+            vel_std = torch.as_tensor(vel_stats.get("std", 0.0), dtype=torch.float32)
+            vel_std_max = float(vel_std.abs().max().item()) if vel_std.numel() > 0 else 0.0
+            if vel_std_max > 0:
+                self._vel_scale = vel_std_max
+            else:
+                self._vel_scale = float(self._pos_scale / max(self._dt, 1e-8))
 
         # Pair nets
         self._phi_net = PairConservativePhiNetDistOnly(
             cfg=self._cons_cfg,
             pos_scale=self._pos_scale,
             dt=self._dt,
+            typical_acc=self._typical_acc if self._typical_acc > 0 else None,
         ).to(self._device)
 
         self._alpha_net = PairDissipationAlphaNet(
@@ -355,6 +390,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
                 pos_scale=self._pos_scale,
                 vel_scale=self._vel_scale,
                 dt=self._dt,
+                typical_acc=self._typical_acc if self._typical_acc > 0 else None,
             ).to(self._device)
         else:
             self._wall_mag_net = None
@@ -530,9 +566,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
                 v_tow_lower = torch.relu(-v_k)  # approaching lower wall
                 v_tow_upper = torch.relu(+v_k)  # approaching upper wall
             else:
-                # allow sign; still pass as magnitude-like by abs
-                v_tow_lower = torch.abs(v_k)
-                v_tow_upper = torch.abs(v_k)
+                # distance-only gating: ignore velocity
+                v_tow_lower = torch.zeros_like(v_k)
+                v_tow_upper = torch.zeros_like(v_k)
 
             magL = self._wall_mag_net(d=dL[:, k], v_toward=v_tow_lower, d0=d0)  # (N,) >=0
             magU = self._wall_mag_net(d=dU[:, k], v_toward=v_tow_upper, d0=d0)  # (N,) >=0
@@ -759,8 +795,16 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         # --- Input world (noisy) ---
         noisy_seq = position_sequence + position_sequence_noise
-        x = noisy_seq[:, -1].to(self._device)
-        prev = noisy_seq[:, -2].to(self._device)
+        boundaries = self._boundaries.to(device=self._device, dtype=noisy_seq.dtype)
+        lower, upper = boundaries[:, 0], boundaries[:, 1]
+
+        x = torch.min(torch.max(noisy_seq[:, -1].to(self._device), lower), upper)
+        prev = torch.min(torch.max(noisy_seq[:, -2].to(self._device), lower), upper)
+        next_noisy = torch.min(
+            torch.max((next_positions + position_sequence_noise[:, -1]).to(self._device), lower),
+            upper,
+        )
+
         v = (x - prev) / max(self._dt, 1e-8)
 
         nparticles_per_example = nparticles_per_example.to(self._device)
@@ -777,17 +821,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         # --- Target in the SAME noisy world ---
         with torch.no_grad():
-            boundaries = self._boundaries.to(device=self._device, dtype=x.dtype)
-            lower, upper = boundaries[:, 0], boundaries[:, 1]
-
-            # clamp only for target generation to avoid out-of-box spikes caused by noise
-            x_clamped = torch.min(torch.max(x, lower), upper)
-            prev_for_target = noisy_seq[:, -2].to(self._device)
-            next_noisy = (next_positions + position_sequence_noise[:, -1]).to(self._device)
-            next_clamped = torch.min(torch.max(next_noisy, lower), upper)
-
-            v_next = next_clamped - x_clamped
-            v_prev = x_clamped - prev_for_target
+            v_next = next_noisy - x
+            v_prev = x - prev
             target_acc = v_next - v_prev  # == a*dt^2
             target_normalized = (target_acc - acc_mean) / acc_std
 

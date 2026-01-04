@@ -654,22 +654,24 @@ def train(cfg: Config, device: torch.device):
                     micro_accum_start = time.perf_counter()
 
                 features, labels = example
-                position = features[0].to(device)
-                particle_type = features[1].to(device)
+                position = features[0].to(device, non_blocking=True)
+                particle_type = features[1].to(device, non_blocking=True)
                 if len(features) == 4:
-                    material_property = features[2].to(device)
-                    n_particles_per_example = features[3].to(device)
+                    material_property = features[2].to(device, non_blocking=True)
+                    n_particles_per_example = features[3].to(device, non_blocking=True)
                 elif len(features) == 3:
                     material_property = None
-                    n_particles_per_example = features[2].to(device)
+                    n_particles_per_example = features[2].to(device, non_blocking=True)
                 else:
                     raise NotImplementedError
-                labels = labels.to(device)
+                labels = labels.to(device, non_blocking=True)
 
                 sampled_noise = noise_sampler(position, noise_std_last_step=cfg.noise_std).to(
-                    device
+                    device, non_blocking=True
                 )
-                non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
+                non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(
+                    device, non_blocking=True
+                )
                 sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
                 autocast_kwargs: dict[str, Any] = {
