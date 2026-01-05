@@ -555,6 +555,12 @@ def train(cfg: Config, device: torch.device):
                 pair_max = last_batch_debug_stats.get("a_pair_abs_max")
                 wall_mean = last_batch_debug_stats.get("a_wall_abs_mean")
                 wall_max = last_batch_debug_stats.get("a_wall_abs_max")
+                neigh_mean = last_batch_debug_stats.get("neighbor_edges_mean")
+                neigh_max = last_batch_debug_stats.get("neighbor_edges_max")
+                min_d = last_batch_debug_stats.get("min_d")
+                min_d_edges = last_batch_debug_stats.get("min_d_edges")
+                a_pred_mean = last_batch_debug_stats.get("a_pred_abs_mean")
+                a_pred_p95 = last_batch_debug_stats.get("a_pred_abs_p95")
                 phi_mean = last_batch_debug_stats.get("phi_mean")
                 phi_max = last_batch_debug_stats.get("phi_max")
                 alpha_mean = last_batch_debug_stats.get("alpha_mean")
@@ -563,6 +569,14 @@ def train(cfg: Config, device: torch.device):
                     log_parts.append(f"|a_pair|={pair_mean:.4e}/{pair_max:.4e}")
                 if wall_mean is not None and wall_max is not None:
                     log_parts.append(f"|a_wall|={wall_mean:.4e}/{wall_max:.4e}")
+                if neigh_mean is not None and neigh_max is not None:
+                    log_parts.append(f"edges={neigh_mean:.2f}/{neigh_max:.0f}")
+                if min_d is not None:
+                    log_parts.append(f"min_d={min_d:.3e}")
+                if min_d_edges is not None:
+                    log_parts.append(f"min_d_edge={min_d_edges:.3e}")
+                if a_pred_mean is not None and a_pred_p95 is not None:
+                    log_parts.append(f"|a_pred|={a_pred_mean:.4e}/p95={a_pred_p95:.4e}")
                 if phi_mean is not None and phi_max is not None:
                     log_parts.append(f"phi={phi_mean:.4e}/{phi_max:.4e}")
                 if alpha_mean is not None and alpha_max is not None:
@@ -620,6 +634,12 @@ def train(cfg: Config, device: torch.device):
                     ("a_pair_abs_max", "train/a_pair_max"),
                     ("a_wall_abs_mean", "train/a_wall_mean"),
                     ("a_wall_abs_max", "train/a_wall_max"),
+                    ("neighbor_edges_mean", "train/neighbor_edges_mean"),
+                    ("neighbor_edges_max", "train/neighbor_edges_max"),
+                    ("min_d", "train/min_distance"),
+                    ("min_d_edges", "train/min_distance_edges"),
+                    ("a_pred_abs_mean", "train/a_pred_mean"),
+                    ("a_pred_abs_p95", "train/a_pred_p95"),
                     ("phi_mean", "train/phi_mean"),
                     ("phi_max", "train/phi_max"),
                     ("alpha_mean", "train/alpha_mean"),

@@ -871,6 +871,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
                 diss_dbg=diss_dbg,
                 rho=cons_dbg.get("rho"),
                 x=x,
+                pair_geom=pair_geom,
+                nparticles_per_example=nparticles_per_example,
+                a_total=a,
             )
         else:
             self._last_debug_stats = None
@@ -886,6 +889,16 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         diss_dbg: dict[str, torch.Tensor | None],
         rho: torch.Tensor | None,
         x: torch.Tensor | None,
+        pair_geom: tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+        | None,
+        nparticles_per_example: torch.Tensor,
+        a_total: torch.Tensor,
     ) -> dict[str, float | None]:
         def _mean_and_max(t: torch.Tensor | None) -> tuple[float | None, float | None]:
             if t is None or t.numel() == 0:
@@ -945,7 +958,78 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             stats["rho_near_mean"] = None
             stats["rho_away_mean"] = None
 
+        # neighbor edge count (unique undirected pairs)
+        if pair_geom is not None and x is not None and x.numel() > 0:
+            i_idx, j_idx = pair_geom[0]
+            num_nodes = x.shape[0]
+            deg = torch.zeros(num_nodes, device=x.device, dtype=torch.float32)
+            ones = torch.ones_like(i_idx, dtype=torch.float32, device=x.device)
+            deg = deg.index_add(0, i_idx, ones)
+            deg = deg.index_add(0, j_idx, ones)
+            stats["neighbor_edges_mean"] = float(deg.mean().item()) if deg.numel() > 0 else None
+            stats["neighbor_edges_max"] = float(deg.max().item()) if deg.numel() > 0 else None
+        else:
+            stats["neighbor_edges_mean"] = None
+            stats["neighbor_edges_max"] = None
+
+        # min distance over edges (within cutoff)
+        if pair_geom is not None:
+            dist = pair_geom[2].detach()
+            stats["min_d_edges"] = float(dist.min().item()) if dist.numel() > 0 else None
+        else:
+            stats["min_d_edges"] = None
+
+        # global minimum distance (per example)
+        if x is not None and nparticles_per_example is not None and x.numel() > 0:
+            stats["min_d"] = self._compute_min_distance_all(
+                x.detach(), nparticles_per_example.detach()
+            )
+        else:
+            stats["min_d"] = None
+
+        # |a_pred| stats (total acceleration including wall/gravity)
+        if a_total is not None and a_total.numel() > 0:
+            a_mag = torch.linalg.norm(a_total.detach(), dim=-1)
+            if a_mag.numel() > 0:
+                a_mag_f = a_mag.float()
+                stats["a_pred_abs_mean"] = float(a_mag_f.mean().item())
+                stats["a_pred_abs_p95"] = float(torch.quantile(a_mag_f, 0.95).item())
+            else:
+                stats["a_pred_abs_mean"] = None
+                stats["a_pred_abs_p95"] = None
+        else:
+            stats["a_pred_abs_mean"] = None
+            stats["a_pred_abs_p95"] = None
+
         return stats
+
+    def _compute_min_distance_all(
+        self, x: torch.Tensor, nparticles_per_example: torch.Tensor
+    ) -> float | None:
+        with torch.no_grad():
+            counts = nparticles_per_example.to(device=x.device, dtype=torch.long)
+            mins: list[torch.Tensor] = []
+            start = 0
+            for n in counts.tolist():
+                n_int = int(n)
+                if n_int <= 1:
+                    start += n_int
+                    continue
+                slice_pos = x[start : start + n_int]
+                if slice_pos.numel() == 0:
+                    start += n_int
+                    continue
+                dist = torch.cdist(slice_pos, slice_pos)
+                if dist.numel() == 0:
+                    start += n_int
+                    continue
+                dist.fill_diagonal_(torch.inf)
+                mins.append(dist.min())
+                start += n_int
+
+            if not mins:
+                return None
+            return float(torch.stack(mins).min().item())
 
     def get_last_debug_stats(self) -> dict[str, float | None] | None:
         return self._last_debug_stats
