@@ -25,41 +25,58 @@
       <div class="crossnote markdown-preview  ">
       
 <h2 id="gnsgraph-network-based-simulatorsとは">gns(graph network based simulators)とは </h2>
-<p>流体、剛体、変形可能な物質などの相互作用をシミュレーションすることができる機械学習フレームワーク。</p>
-<p>入力には各粒子の状態（位置、速度）を受け取り、1ステップ先の加速度を出力する。教師データは各粒子の加速度が与えられるので、その値に近づくように学習する。</p>
+<p>水や砂、布などの異なる種類の物質が同時に存在する空間でそれらのふるまいをシミュレーションする方法。<br>
+この手法では物質を細かく区切って、区切られた点である粒子の集まりで成り立っていると捉える。<br>
+近くにある粒子同士が押したり引いたりすることで物質の動きが決まると仮定する。</p>
+<p>この粒子の動きを予測することで、物質全体のふるまいをシミュレーションする。<br>
+この予測にはニューラルネットワークを用いる。<br>
+ニューラルネットワークでは学習と推論の 2 段階がある。<br>
+学習で与えられた入力に対して期待される出力を返すように関数の形を学習する。<br>
+推論では学習した関数を用いて未知の入力に対して出力を返す。</p>
 <h3 id="具体的なモデル構造">具体的なモデル構造 </h3>
+<p>[図を入れる]</p>
 <p>各時間ステップに対して以下の処理を行う。<br>
 <strong>encoder</strong><br>
-各粒子に対して、近傍の粒子間にエッジを張る。<br>
-すべてのノードとエッジをMLPで潜在ベクトルに変換する。<br>
-<strong>processor</strong><br>
-各エッジを自身のエッジと、接続しているノードを入力として更新する。<br>
-各ノードを自身のノードと、接続している更新されたエッジを入力として更新する。<br>
+各ノードに対して、近傍のノード間にエッジを張る。<br>
+ノードとエッジの特徴量(位置、速度、相対位置など)を MLP と呼ばれる小さなニューラルネットワークで潜在ベクトルに変換する。<br>
+この変換によって同じ形になるので扱いやすくなる。<!-- 説明不足 --><br>
+<strong>processor</strong></p>
+<ul>
+<li>各エッジを自身のエッジと、接続しているノードを入力として mlp で更新する。<br>
+これにより粒子同士がどのような関係性なのかが反映される。</li>
+<li>次に、各ノードを自身のノードと、接続している更新されたエッジを入力として mlp で更新する。<br>
+これによりその関係性をもとにノードの情報が更新される。</li>
+</ul>
+<p>この操作は複数回繰り返される。それによりより遠くの粒子の情報も取り込むことができる。<br>
 <strong>decoder</strong><br>
-MLPを使って各ノードのベクトルを加速度に変換する。<br>
+MLP を使って各ノードのベクトルを加速度に変換する.<br>
 <strong>学習</strong><br>
-粒子をランダムにサンプリングし加速度に対する損失が小さくなるようにパラメータを更新する。</p>
-<h3 id="gnsの良い点">gnsの良い点 </h3>
-<p>ノード特徴に物質のフラグを入れることで、単一のモデルで複数の物質を扱うことができる。<br>
-近傍をメッセージパッシングするという構造が、物理における局所相互作用性を反映している。<br>
+出力された加速度と正解の加速度の差が小さくなるよう学習する。</p>
+<p><strong>推論</strong><br>
+学習したモデルを用いて、現在の粒子の位置と速度から次の時間ステップの粒子の加速度を出力する。<br>
+その加速度から次の時間ステップの位置と速度を計算する。</p>
+<h3 id="gns-の良い点">gns の良い点 </h3>
+<p>ノードの特徴量に物質を区別するための簡単なラベルを追加するだけで、異なる物質を同時に扱うことができる。<br>
 従来のニューラルネットワークベースのものに比べて精度と汎化が良い。</p>
-<h3 id="gnsの課題">gnsの課題 </h3>
-<p>長い時間予測すると誤差が蓄積する。<br>
+<h3 id="gns-の課題">gns の課題 </h3>
+<p>1 ステップの予測を繰り返して長い時間予測(ロールアウト）すると、誤差が含まれる出力が次の入力になるので誤差が蓄積していく。<br>
 特に粒子数を増やしていくと推論時間が従来の手法よりも長くなりやすい。</p>
-<p>gnsの課題であるロールアウトによる誤差の蓄積を解決するために新しい手法を考える。<br>
+<p>gns の課題であるロールアウトによる誤差の蓄積を解決するために新しい手法を考える。<br>
 今回は対象を絞るために流体を扱う。</p>
-<h2 id="sph法">SPH法 </h2>
-<p>教師データの作成にはgnsと同じように、流体を粒子の集合として扱うsph法を採用する。</p>
+<h2 id="sph-法">SPH 法 </h2>
+<p>教師データの作成には gns と同じように、流体を粒子の集合として扱う sph 法を採用する。</p>
 <h3 id="具体的な手法">具体的な手法 </h3>
 <p>流体力学において以下の基礎方程式について解く必要がある。<br>
-[具体的な式を書く]<br>
-連続の式<br>
-運動方程式<br>
+[式を書く]<br>
+連続の式(密度に関する式)<br>
+運動方程式(加速度の式)<br>
 状態方程式（圧力の式）<br>
 圧力は扱う流体によって異なる定義がある。今回は水に近い非圧縮流体を考える。</p>
-<p>sph法は以下の式で定義される。<br>
+<p>sph 法は密度、加速度、圧力を以下のように近似する。<br>
+[式を書く]<br>
 密度の定義<br>
-運動方程式の定義</p>
+運動方程式の定義<br>
+圧力の定義</p>
 <p>これは流体力学の基礎方程式に対して、カーネル近似と積分の離散化を行った形と一致している。</p>
 <p>流体の力は大きく保存力と散逸に分けられる。<br>
 保存力は圧力や重力など位置や密度に依存し、ポテンシャルエネルギーの勾配で表される。<br>
@@ -68,25 +85,30 @@ MLPを使って各ノードのベクトルを加速度に変換する。<br>
 <li><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>U</mi></mrow><annotation encoding="application/x-tex">U</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathnormal" style="margin-right:0.10903em;">U</span></span></span></span> ポテンシャルエネルギー</li>
 </ul>
 <p>散逸は粘性や摩擦などによるもので速度に依存し、運動エネルギーを減らしていく方向に働く。</p>
-<p>このようなバイアスをgnsに組み込むことで長期ロールアウトによる誤差の蓄積を抑える手法を次で提案する。</p>
+<p>gns は加速度を直接予測するため、保存力と散逸の両方を同時に学習しなければならない。<br>
+保存力と散逸は物理的に異なる性質を持つため別々に学習することで、長期ロールアウトによる誤差の蓄積を抑える手法を次で提案する。</p>
 <h2 id="提案する手法">提案する手法 </h2>
-<p>gnsによる出力を加速度ではなく、保存力と散逸を計算する形にする。</p>
+<p>gns による出力を加速度ではなく、保存力と散逸を計算する形にする。</p>
 <h3 id="具体的な手法-1">具体的な手法 </h3>
-<p>gnsと同じ構造を用いてポテンシャルエネルギーと、散逸による加速度を別々に出力する。<br>
+<p>gns と同じ構造を用いてポテンシャルエネルギーと、散逸による加速度を別々に出力する。<br>
 水を想定して弱圧縮流体を扱う。</p>
+<p><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi>U</mi><mo stretchy="false">(</mo><mi>X</mi><mo stretchy="false">)</mo><mo>=</mo><munder><mo>∑</mo><mrow><mi>i</mi><mo separator="true">,</mo><mi>j</mi></mrow></munder><msub><mi>f</mi><mi>θ</mi></msub><mo stretchy="false">(</mo><msub><mi>x</mi><mi>i</mi></msub><mo separator="true">,</mo><msub><mi>x</mi><mi>j</mi></msub><mo stretchy="false">)</mo><mo>+</mo><mi>g</mi></mrow><annotation encoding="application/x-tex">U(X) = \sum_{i,j} f_{\theta} (x_i, x_j) + g</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord mathnormal" style="margin-right:0.10903em;">U</span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right:0.07847em;">X</span><span class="mclose">)</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:2.4638em;vertical-align:-1.4138em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:1.05em;"><span style="top:-1.8723em;margin-left:0em;"><span class="pstrut" style="height:3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right:0.05724em;">j</span></span></span></span><span style="top:-3.05em;"><span class="pstrut" style="height:3.05em;"></span><span><span class="mop op-symbol large-op">∑</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:1.4138em;"><span></span></span></span></span></span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.10764em;">f</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3361em;"><span style="top:-2.55em;margin-left:-0.1076em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right:0.02778em;">θ</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right:0.05724em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.2861em;"><span></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:0.625em;vertical-align:-0.1944em;"></span><span class="mord mathnormal" style="margin-right:0.03588em;">g</span></span></span></span></span></p>
+<p><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mi>a</mi><mrow><mi>i</mi><mtext>保存</mtext></mrow></msub><mo>=</mo><mo>−</mo><msub><mi mathvariant="normal">∇</mi><msub><mi>x</mi><mi>i</mi></msub></msub><mi>U</mi><mo stretchy="false">(</mo><mi>X</mi><mo stretchy="false">)</mo><mi mathvariant="normal">/</mi><msub><mi>m</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">a_{i保存} = - \nabla_{x_i} U(X) / m_i</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.5806em;vertical-align:-0.15em;"></span><span class="mord"><span class="mord mathnormal">a</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3283em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mord cjk_fallback mtight">保存</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1.0001em;vertical-align:-0.2501em;"></span><span class="mord">−</span><span class="mord"><span class="mord">∇</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight"><span class="mord mathnormal mtight">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3281em;"><span style="top:-2.357em;margin-left:0em;margin-right:0.0714em;"><span class="pstrut" style="height:2.5em;"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.143em;"><span></span></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.2501em;"><span></span></span></span></span></span></span><span class="mord mathnormal" style="margin-right:0.10903em;">U</span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right:0.07847em;">X</span><span class="mclose">)</span><span class="mord">/</span><span class="mord"><span class="mord mathnormal">m</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span></span></span></span></span></p>
+<p><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mi>F</mi><mi>i</mi></msub><mo>=</mo><munder><mo>∑</mo><mrow><mi>j</mi><mo>∈</mo><mtext>近傍</mtext></mrow></munder><msub><mi>h</mi><mi>θ</mi></msub><mo stretchy="false">(</mo><msub><mi>v</mi><mi>i</mi></msub><mo>−</mo><msub><mi>v</mi><mi>j</mi></msub><mo stretchy="false">)</mo></mrow><annotation encoding="application/x-tex">F_{i} = \sum_{j\in 近傍} h_{\theta}(v_i - v_j)</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.8333em;vertical-align:-0.15em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.13889em;">F</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:-0.1389em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:2.4804em;vertical-align:-1.4304em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:1.05em;"><span style="top:-1.8557em;margin-left:0em;"><span class="pstrut" style="height:3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right:0.05724em;">j</span><span class="mrel mtight">∈</span><span class="mord cjk_fallback mtight">近傍</span></span></span></span><span style="top:-3.05em;"><span class="pstrut" style="height:3.05em;"></span><span><span class="mop op-symbol large-op">∑</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:1.4304em;"><span></span></span></span></span></span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord"><span class="mord mathnormal">h</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3361em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right:0.02778em;">θ</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal" style="margin-right:0.03588em;">v</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:-0.0359em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:1.0361em;vertical-align:-0.2861em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.03588em;">v</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:-0.0359em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right:0.05724em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.2861em;"><span></span></span></span></span></span></span><span class="mclose">)</span></span></span></span></span></p>
+<p><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><msub><mi>a</mi><mrow><mi>i</mi><mtext>散逸</mtext></mrow></msub><mo>=</mo><msub><mi>F</mi><mi>i</mi></msub><mi mathvariant="normal">/</mi><msub><mi>m</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">a_{i散逸} = F_{i}/m_i</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.5806em;vertical-align:-0.15em;"></span><span class="mord"><span class="mord mathnormal">a</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3283em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mord cjk_fallback mtight">散逸</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.13889em;">F</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:-0.1389em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mord">/</span><span class="mord"><span class="mord mathnormal">m</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span></span></span></span></span></p>
 <p><strong>保存力</strong><br>
 位置を引数にポテンシャルエネルギーを出力する。<br>
 出力されたポテンシャルエネルギーを各方向成分に対して偏微分することで加速度を求める。<br>
-ポテンシャルエネルギーの計算はニューラルネットワークの関数とみることができて、pytorchの自動微分を用いて偏微分を計算する。<br>
+ポテンシャルエネルギーの計算はニューラルネットワークの関数とみることができて、pytorch の自動微分を用いて偏微分を計算する。<br>
 <strong>散逸</strong><br>
 相対速度を引数に散逸による加速度を出力する。<br>
 散逸による加速度は運動エネルギーが増えないように設計する。</p>
-<p>そのあとは、加速度を合計してgnsと同じように学習を進める。</p>
+<p>そのあとは、加速度を合計して gns と同じように学習を進める。</p>
 <p>ポテンシャルエネルギーから偏微分できるものだけに限定されるので、仮説空間を狭めることができる。<br>
 自由度をポテンシャルエネルギーと散逸それぞれで制限しつつ、エネルギーが勝手に作られないようにすることで、長期のロールアウト誤差の減少が期待できる。</p>
 <h3 id="結果">結果 </h3>
-<p>元論文のgnsと比較する。<br>
-1ステップとロールアウトの誤差を比べる。<br>
+<p>元論文の gns と比較する。<br>
+1 ステップとロールアウトの誤差を比べる。<br>
 横軸タイムステップ、縦軸位置誤差。<br>
 パラメータ数や計算量をそろえる。<br>
 保存力と散逸部分の加速度を教師データと比較してちゃんとバイアスが効いているか確かめる。<br>

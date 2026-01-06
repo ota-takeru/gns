@@ -62,13 +62,63 @@ def _guess_latest_rollout() -> Path | None:
     return candidates[-1][1]
 
 
-def _compute_marker_size(spacing: float | None, scale: float = 1.0) -> float:
+def _compute_marker_size(
+    spacing: float | None,
+    scale: float = 1.0,
+    num_particles: int | None = None,
+) -> float:
+    """見やすさ優先でマーカーサイズを計算する。
+
+    - spacing が小さいときは極端に大きくならないよう抑制
+    - 粒子数が多いときは自動で縮小して潰れにくくする
+    """
+
     scale = max(0.1, float(scale))
+
     if spacing is None or spacing <= 0:
-        return 16.0 * scale**2
-    radius = max(1.5, spacing * 45.0)
-    radius *= scale
-    return min(72.0, radius**2)
+        base = 16.0 * scale**2
+    else:
+        radius = max(1.2, spacing * 40.0)
+        radius *= scale
+        base = radius**2
+
+    # 過度なサイズを防ぎ、最低限の視認性も確保
+    base = min(60.0, max(4.0, base))
+
+    if num_particles and num_particles > 0:
+        # 粒子数が多い場合は自動で縮小（基準 1800 個）
+        target = 1800
+        if num_particles > target:
+            shrink = math.sqrt(target / num_particles)
+            base *= shrink
+
+    return base
+
+
+def _estimate_spacing_from_positions(positions: np.ndarray | None) -> float | None:
+    """座標から概算の粒子間隔を推定する（メタデータ無い場合のフォールバック）。"""
+
+    if positions is None or positions.size == 0:
+        return None
+
+    first = positions[0]
+    if first.ndim != 2 or first.shape[0] == 0:
+        return None
+
+    dim = first.shape[1]
+    if dim not in (2, 3):
+        return None
+
+    spans = first.max(axis=0) - first.min(axis=0)
+    if np.any(spans <= 0):
+        return None
+
+    volume = float(np.prod(spans))
+    if not math.isfinite(volume) or volume <= 0:
+        return None
+
+    spacing = (volume / max(1, first.shape[0])) ** (1.0 / dim)
+    return float(spacing)
 
 
 def _load_viz_params_from_config() -> tuple[float | None, float | None]:
@@ -91,7 +141,7 @@ def _load_viz_params_from_config() -> tuple[float | None, float | None]:
     return spacing, scale
 
 
-def _resolve_particle_spacing(metadata: dict | None) -> float | None:
+def _resolve_particle_spacing(metadata: dict | None, positions: np.ndarray | None = None) -> float | None:
     if isinstance(metadata, dict):
         spacing = metadata.get("particle_spacing")
         if isinstance(spacing, (int, float)) and spacing > 0:
@@ -99,8 +149,12 @@ def _resolve_particle_spacing(metadata: dict | None) -> float | None:
         density = metadata.get("particle_density")
         if isinstance(density, (int, float)) and density > 0:
             return 1.0 / math.sqrt(float(density))
+
     spacing, _ = _load_viz_params_from_config()
-    return spacing
+    if spacing:
+        return spacing
+
+    return _estimate_spacing_from_positions(positions)
 
 
 def _resolve_marker_scale(metadata: dict | None) -> float:
@@ -207,7 +261,7 @@ def visualize_rollout(
     n_frames = len(all_positions_pred)
     dim = all_positions_pred.shape[-1]
     metadata = data.get("metadata")
-    particle_spacing = _resolve_particle_spacing(metadata)
+    particle_spacing = _resolve_particle_spacing(metadata, all_positions_pred)
     marker_scale = _resolve_marker_scale(metadata)
 
     # 2D or 3D
@@ -282,7 +336,9 @@ def visualize_2d(
         x_min, x_max = all_pos[..., 0].min() - 1, all_pos[..., 0].max() + 1
         y_min, y_max = all_pos[..., 1].min() - 1, all_pos[..., 1].max() + 1
 
-    particle_size = _compute_marker_size(particle_spacing, marker_scale)
+    particle_size = _compute_marker_size(
+        particle_spacing, marker_scale, num_particles=positions_pred.shape[1]
+    )
     particle_alpha = 0.9
     scatter_kwargs = dict(s=particle_size, alpha=particle_alpha, linewidths=0)
 
@@ -387,7 +443,9 @@ def visualize_3d(
     y_min, y_max = all_pos[..., 1].min() - 1, all_pos[..., 1].max() + 1
     z_min, z_max = all_pos[..., 2].min() - 1, all_pos[..., 2].max() + 1
 
-    particle_size = _compute_marker_size(particle_spacing, marker_scale)
+    particle_size = _compute_marker_size(
+        particle_spacing, marker_scale, num_particles=positions_pred.shape[1]
+    )
     particle_alpha = 0.8
     scatter_kwargs = dict(s=particle_size, alpha=particle_alpha, edgecolors="none", linewidths=0)
 
