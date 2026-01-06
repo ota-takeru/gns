@@ -29,6 +29,8 @@ method_options:
       dropout: 0.0
       alpha_max: 1.0
       s_clip_scaled: 5.0
+    wall:
+      enabled: false # 壁MLP項を無効化（壁由来の加速度をオフ）
     cutoff:
       kind: cosine
     integrator:

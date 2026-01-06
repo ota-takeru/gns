@@ -12,10 +12,10 @@ scenario_options:
 method: hamiltonian_sph
 method_options:
   hamiltonian_sph:
-    particle_mass: null            # 未指定ならメタデータから自動推定
+    particle_mass: null # 未指定ならメタデータから自動推定
     sph:
       # 粒子間隔0.12・rc≈0.32（=2*h）の想定で近傍数を ~20 に増やす
-      smoothing_length: 0.16       # 2*h がカットオフ半径（約0.32）
+      smoothing_length: 0.16 # 2*h がカットオフ半径（約0.32）
       max_num_neighbors: 128
     conservative:
       mlp_layers: 2
@@ -29,23 +29,25 @@ method_options:
       dropout: 0.0
       alpha_max: 1.0
       s_clip_scaled: 5.0
+    wall:
+      enabled: false # 壁MLP項を無効化（壁由来の加速度をオフ）
     cutoff:
       kind: cosine
     integrator:
       dt: 0.006
-      type: leapfrog               # leapfrog|symplectic_euler
-    gravity: [0.0, -9.81]          # 2D データセットに合わせる
+      type: leapfrog # leapfrog|symplectic_euler
+    gravity: [0.0, -9.81] # 2D データセットに合わせる
     include_external_acceleration: true
-    pos_feature_scale: null        # null で半径を使用
-    vel_feature_scale: null        # null で pos_feature_scale/dt
+    pos_feature_scale: null # null で半径を使用
+    vel_feature_scale: null # null で pos_feature_scale/dt
 model_path: ./models/ # モデルやtrain_stateの保存先
 output_path: ./rollouts/
 output_filename: rollout
 
-batch_size: 96
+batch_size: 80
 noise_std: 0.0
-noise: random_walk     # ノイズ生成の種類（デフォルト従来挙動）
-loss: acceleration     # ロス関数（デフォルト従来挙動）
+noise: random_walk # ノイズ生成の種類（デフォルト従来挙動）
+loss: acceleration # ロス関数（デフォルト従来挙動）
 
 # トレーニング
 ntraining_steps: 1000000
