@@ -27,6 +27,29 @@ method_options:
       dropout: 0.0
       alpha_max: 1.0
       s_clip_scaled: 5.0
+    terms:
+      enable_central: true
+      enable_pressure: true
+      enable_contact: true
+      enable_damping: true
+      w_central: 1.0
+      w_pressure: 1.0
+      w_contact: 1.0
+      w_damping: 1.0
+    pressure:
+      enabled: true
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      dropout: 0.0
+      rep_max_multiplier: 2.0
+      use_compression_gate: true
+    contact:
+      enabled: true
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      dropout: 0.0
+      alpha_max: 10.0
+      s_clip_scaled: 50.0
     cutoff:
       kind: cosine
     integrator:
