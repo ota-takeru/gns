@@ -8,6 +8,7 @@ rollouts/フォルダ内のpklファイルを読み込み、
 
 import argparse
 import math
+import os
 import pickle
 from pathlib import Path
 
@@ -17,8 +18,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-# HTML 埋め込みのサイズ制限を解除する（フレーム数に制限をかけない）
-matplotlib.rcParams["animation.embed_limit"] = 0
+# HTML 埋め込みのサイズ上限 (MB)。0 は「上限 0MB」扱いで全フレームが落ちるので避ける。
+_EMBED_LIMIT_MB = float(os.environ.get("GNS_EMBED_LIMIT_MB", "1000"))
+matplotlib.rcParams["animation.embed_limit"] = _EMBED_LIMIT_MB
 
 
 def _candidate_rollout_roots() -> list[Path]:
