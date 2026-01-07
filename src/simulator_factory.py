@@ -8,6 +8,7 @@ from hamiltonian_sph import (
     IntegratorConfig,
     SPHConfig,
     WallConfig,
+    WallParticleConfig,
 )
 from learned_simulator import BaseSimulator, get_simulator_class
 from train_config import Config, NUM_PARTICLE_TYPES
@@ -164,6 +165,18 @@ def _get_simulator(
             },
             label="wall",
         )
+        method_options["wall_particles"] = _sanitize_dict(
+            method_options.get("wall_particles"),
+            allowed_keys={
+                "enabled",
+                "particle_type_id",
+                "freeze_walls",
+                "zero_wall_acceleration",
+                "disable_wall_mlp",
+                "disable_rollout_reflection",
+            },
+            label="wall_particles",
+        )
         method_options["cutoff"] = _sanitize_dict(
             method_options.get("cutoff"), allowed_keys={"kind"}, label="cutoff"
         )
@@ -175,6 +188,7 @@ def _get_simulator(
         method_options["conservative"] = _maybe(ConservativeConfig, "conservative")
         method_options["dissipation"] = _maybe(DissipationConfig, "dissipation")
         method_options["wall"] = _maybe(WallConfig, "wall")
+        method_options["wall_particles"] = _maybe(WallParticleConfig, "wall_particles")
         method_options["cutoff"] = _maybe(CutoffConfig, "cutoff")
         method_options["integrator"] = _maybe(IntegratorConfig, "integrator")
 
@@ -183,6 +197,7 @@ def _get_simulator(
             "conservative",
             "dissipation",
             "wall",
+            "wall_particles",
             "cutoff",
             "integrator",
             "particle_mass",

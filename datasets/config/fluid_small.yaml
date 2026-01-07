@@ -12,6 +12,7 @@ defaults:
   viscosity: 35.0
   boundary_damping: 0.35
   boundary_clamp_limit: 1.0
+  wall_particle_layers: 0
   xsph_factor: 0.05
   position_noise: 0.05
   gravity: [0.0, -9.81]

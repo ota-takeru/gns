@@ -31,6 +31,13 @@ method_options:
       s_clip_scaled: 5.0
     wall:
       enabled: false # 壁MLP項を無効化（壁由来の加速度をオフ）
+    wall_particles:
+      enabled: true
+      particle_type_id: 3
+      freeze_walls: true
+      zero_wall_acceleration: true
+      disable_wall_mlp: true
+      disable_rollout_reflection: true
     cutoff:
       kind: cosine
     integrator:

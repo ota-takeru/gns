@@ -11,6 +11,7 @@ defaults:
   viscosity: 45.0
   boundary_damping: 0.35
   boundary_clamp_limit: 1.0
+  wall_particle_layers: 0
   xsph_factor: 0.05
   position_noise: 0.08
   gravity: [0.0, -9.81]
@@ -32,6 +33,8 @@ defaults:
 cases:
   - name: dam_break_left
     seed: 100
+    output_subdir: dam_break_left_wall2
+    wall_particle_layers: 2
 
   # - name: dam_break_right
   #   seed: 200

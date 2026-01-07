@@ -20,6 +20,8 @@ except ImportError:  # pragma: no cover
         sys.path.insert(0, str(ROOT_DIR))
     from datasets.scripts import dataset_utils
 
+KINEMATIC_PARTICLE_ID = 3
+
 
 @dataclass
 class DomainConfig:
@@ -60,6 +62,7 @@ class FluidCaseConfig:
     viscosity: float = 40.0
     boundary_damping: float = 0.5
     boundary_clamp_limit: float = 1.0
+    wall_particle_layers: int = 0
     gravity: Tuple[float, float] = field(default_factory=lambda: (0.0, -9.81))
     xsph_factor: float = 0.0
     position_noise: float = 0.01
@@ -412,7 +415,22 @@ def generate_scene(
     rng = random.Random(seed)
     sim = PySPHSimulation(cfg, rng)
     positions = sim.rollout(cfg.timesteps)
-    particle_types = np.zeros(positions.shape[1], dtype=np.int32)
+    dynamic_count = positions.shape[1]
+
+    wall_coords = np.empty((0, 2), dtype=np.float32)
+    if cfg.wall_particle_layers > 0:
+        wall_coords = sim._create_boundary_particles(layers=cfg.wall_particle_layers)
+        if len(wall_coords):
+            wall_positions = np.repeat(
+                wall_coords[None, :, :], positions.shape[0], axis=0
+            )
+            positions = np.concatenate([positions, wall_positions], axis=1)
+
+    n_wall = int(wall_coords.shape[0])
+    particle_types = np.zeros(dynamic_count + n_wall, dtype=np.int32)
+    if n_wall > 0:
+        particle_types[dynamic_count:] = KINEMATIC_PARTICLE_ID
+
     meta = {
         "seed": seed,
         "dt": cfg.dt,
@@ -426,6 +444,8 @@ def generate_scene(
         "gravity": list(cfg.gravity),
         "boundary_damping": cfg.boundary_damping,
         "boundary_augment": cfg.boundary_clamp_limit,
+        "wall_particles": int(n_wall),
+        "wall_particle_layers": int(cfg.wall_particle_layers),
         "note": "synthetic 2D SPH fluid scene",
         "simulator": "pysph_wcsph",
         "sph_backend": "PySPH",
@@ -485,6 +505,8 @@ def _generate_split(
                 "bounds",
                 "boundary_augment",
                 "gravity",
+                "wall_particles",
+                "wall_particle_layers",
             )
             if key in last_meta
         }

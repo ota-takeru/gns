@@ -34,6 +34,7 @@ class DatasetConfig:
     rigid_count_range: tuple[int, int] = field(default_factory=lambda: (2, 5))
     particle_density: float = 150.0  # 粒子密度（単位面積当たりの粒子数）
     wall_density_scale: float = 1.0  # 壁の密度スケール（1.0で同じ密度）
+    wall_particle_layers: int = 0  # 壁粒子の層数（0で無効）
     gravity: tuple[float, float] = field(default_factory=lambda: (0.0, -9.81))
     visualization_marker_scale: float = 1.0  # 可視化時のマーカーサイズ倍率
     boundary_clamp_limit: float = 1.0  # 壁距離特徴のクリップ上限
@@ -249,6 +250,48 @@ def _density_to_spacing(particle_density: float) -> float:
     return 1.0 / math.sqrt(particle_density)
 
 
+def _inward_normal(a: np.ndarray, b: np.ndarray, center: np.ndarray) -> np.ndarray:
+    seg = b - a
+    seg_len = float(np.linalg.norm(seg))
+    if seg_len == 0.0:
+        return np.array([0.0, 1.0], dtype=np.float32)
+    t = seg / seg_len
+    n = np.array([-t[1], t[0]], dtype=np.float32)
+    mid = 0.5 * (a + b)
+    to_center = center - mid
+    if float(np.dot(n, to_center)) < 0.0:
+        n = -n
+    return n
+
+
+def _sample_wall_particles(
+    walls: list[tuple[pymunk.Body, pymunk.Shape]],
+    bounds: np.ndarray,
+    spacing: float,
+    layers: int,
+) -> np.ndarray:
+    if layers <= 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    coords_list = []
+    center = bounds.mean(axis=1)
+    for _, shape in walls:
+        if not isinstance(shape, pymunk.Segment):
+            continue
+        pts = sample_shape_points(shape, spacing=spacing, include_interior=False)
+        if pts.size == 0:
+            continue
+        a = np.array(shape.a, dtype=np.float32)
+        b = np.array(shape.b, dtype=np.float32)
+        n = _inward_normal(a, b, center)
+        for layer in range(layers):
+            offset = n * (layer * spacing * 0.5)
+            coords_list.append(pts + offset)
+    if not coords_list:
+        return np.zeros((0, 2), dtype=np.float32)
+    coords = np.unique(np.vstack(coords_list), axis=0)
+    return coords.astype(np.float32, copy=False)
+
+
 def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
     space = make_space(cfg.gravity)
     walls, bounds = add_wall_as_rigid(space)
@@ -301,6 +344,19 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
 
     dynamic_particles = N
 
+    wall_layers = int(cfg.wall_particle_layers)
+    wall_coords = np.zeros((0, 2), dtype=np.float32)
+    if wall_layers > 0:
+        wall_scale = float(cfg.wall_density_scale)
+        wall_scale = max(wall_scale, 1e-6)
+        wall_spacing = particle_spacing / wall_scale
+        wall_coords = _sample_wall_particles(walls, bounds, wall_spacing, wall_layers)
+        if wall_coords.size:
+            wall_positions = np.repeat(wall_coords[None, :, :], T, axis=0)
+            positions = np.concatenate([positions, wall_positions], axis=1)
+            wall_ids = np.full((wall_coords.shape[0],), len(bodies), dtype=np.int32)
+            rigid_ids = np.concatenate([rigid_ids, wall_ids], axis=0)
+
     meta = dict(
         seed=scene_seed,
         nb=len(bodies),  # 落下する剛体の数
@@ -309,7 +365,8 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
         dt=dt,
         substeps=substeps,
         note="pymunk random drop scene with static wall boundaries",
-        wall_particles=0,
+        wall_particles=int(wall_coords.shape[0]),
+        wall_particle_layers=int(wall_layers),
         dynamic_particles=int(dynamic_particles),
         particle_density=float(cfg.particle_density),
         particle_spacing=float(particle_spacing),
@@ -324,8 +381,8 @@ def generate_scene(cfg: DatasetConfig, rng: random.Random, scene_seed: int):
 
 def _extract_all_positions_with_types(positions, rigid_ids, n_dynamic_rigid):
     """Extract all positions and assign particle types (0=dynamic)."""
-    # Wall interactions are modelled via distance-to-boundary features, but we keep the
-    # kinematic type ID reserved for backward compatibility with downstream code.
+    # Wall interactions can be modelled via boundary features or explicit wall particles.
+    # We keep the kinematic type ID reserved for backward compatibility.
     particle_types = np.where(rigid_ids < n_dynamic_rigid, 0, 3).astype(np.int32)
     return positions.astype(np.float32, copy=False), particle_types
 
@@ -390,6 +447,8 @@ def main(
                     "particle_density",
                     "wall_density_scale",
                     "visualization_marker_scale",
+                    "wall_particles",
+                    "wall_particle_layers",
                     "bounds",
                     "boundary_augment",
                 )

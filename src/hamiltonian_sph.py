@@ -1,11 +1,13 @@
-"""Central Conservative + Folded Dissipation + Wall-MLP (no wall particles)
+"""Central Conservative + Folded Dissipation (+ optional wall particles / Wall-MLP)
 
 This matches the "GNS-style" idea:
-  - No wall particles.
-  - Each particle gets wall-distance features (to lower/upper walls per axis),
-    and a small wall network outputs per-particle wall acceleration a_wall.
+  - Default: no wall particles.
+  - Optional: wall particles (kinematic) can be added to the dataset and used
+    for reflection via pair interactions.
+  - (Legacy) Each particle can also get wall-distance features and a small wall
+    network outputs per-particle wall acceleration a_wall.
   - Pair interactions remain rotation-safe (dist-only center forces + folded radial dissipation).
-  - Rollout uses boundary reflection as a safety guardrail.
+  - Rollout may use boundary reflection as a safety guardrail.
   - Training uses instantaneous acceleration a(x_t, v_t) and target Δv (= a*dt^2)
     computed in the SAME noisy world as the model input.
 
@@ -14,7 +16,7 @@ Key choices (stable baseline):
   2) Smooth cutoff w(d) (cosine) for pair forces and dissipation.
   3) Conservative term learns center-force magnitude phi(d) directly (dist-only).
   4) Dissipation is folded radial damping with bounded alpha(d, |s|).
-  5) Wall term is axis-aligned (because a box boundary breaks rotation symmetry anyway):
+  5) Wall term (optional MLP) is axis-aligned (because a box boundary breaks rotation symmetry anyway):
        For each axis k:
          dL = x_k - lower_k
          dU = upper_k - x_k
@@ -114,6 +116,21 @@ class WallConfig:
     a_wall_max_multiplier: float = 1.0  # a_wall_max = multiplier * (pos_scale / dt^2)
     d0_multiplier: float = 0.5  # d0 = multiplier * h
     use_velocity_gate: bool = True  # gate by velocity to avoid distance-only pushing
+
+
+@dataclass
+class WallParticleConfig:
+    """Wall particle settings (kinematic particles included in the dataset).
+
+    These particles interact through the same pair forces, but are kept fixed.
+    """
+
+    enabled: bool = False
+    particle_type_id: int = 3  # KINEMATIC_PARTICLE_ID
+    freeze_walls: bool = True  # keep wall particles fixed in integration
+    zero_wall_acceleration: bool = True  # zero out wall particle accelerations
+    disable_wall_mlp: bool = True  # disable Wall-MLP when wall particles are used
+    disable_rollout_reflection: bool = True  # avoid double reflection
 
 
 @dataclass
@@ -342,6 +359,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         conservative: ConservativeConfig | None = None,
         dissipation: DissipationConfig | None = None,
         wall: WallConfig | None = None,
+        wall_particles: WallParticleConfig | None = None,
         cutoff: CutoffConfig | None = None,
         integrator: IntegratorConfig | None = None,
         particle_mass: float = 1.0,
@@ -413,6 +431,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             DissipationConfig(mlp_layers=nmlp_layers, mlp_hidden_dim=mlp_hidden_dim, dropout=0.0),
         )
         self._wall_cfg = _coerce(wall, WallConfig, WallConfig())
+        self._wall_particles_cfg = _coerce(
+            wall_particles, WallParticleConfig, WallParticleConfig()
+        )
         self._use_density = bool(getattr(self._cons_cfg, "use_density", False))
 
         # Scales for stable feature scaling
@@ -452,6 +473,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         ).to(self._device)
 
         # Wall net (no wall particles)
+        if self._wall_particles_cfg.enabled and self._wall_particles_cfg.disable_wall_mlp:
+            self._wall_cfg.enabled = False
+
         self._wall_mag_net: WallMagnitudeNet | None
         if self._wall_cfg.enabled:
             self._wall_mag_net = WallMagnitudeNet(
@@ -463,6 +487,10 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             ).to(self._device)
         else:
             self._wall_mag_net = None
+
+        # If wall particles are enabled, optionally disable rollout reflection.
+        if self._wall_particles_cfg.enabled and self._wall_particles_cfg.disable_rollout_reflection:
+            self._rollout_reflect_walls = False
 
         # External acceleration (gravity)
         if gravity is not None:
@@ -662,7 +690,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
     # ------------------------------------------------------------
     # Rollout boundary reflection (safety guardrail)
     def _apply_boundary_conditions(
-        self, x: torch.Tensor, v: torch.Tensor
+        self, x: torch.Tensor, v: torch.Tensor, mask_exclude: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
         lower = boundaries[:, 0]
@@ -683,7 +711,36 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         v_ref = torch.where(above, -v_ref * self._boundary_restitution, v_ref)
 
         x_ref = torch.min(torch.max(x_ref, lower), upper)
+
+        if mask_exclude is not None:
+            mask = mask_exclude[:, None].to(dtype=torch.bool, device=x_ref.device)
+            x_ref = torch.where(mask, x, x_ref)
+            v_ref = torch.where(mask, v, v_ref)
+
         return x_ref, v_ref
+
+    def _wall_particle_mask(
+        self, particle_types: torch.Tensor | None, num_nodes: int, device: torch.device
+    ) -> torch.Tensor | None:
+        if not self._wall_particles_cfg.enabled or particle_types is None:
+            return None
+        if particle_types.numel() != num_nodes:
+            return None
+        wall_id = int(self._wall_particles_cfg.particle_type_id)
+        return (particle_types.to(device=device) == wall_id)
+
+    def _clamp_positions(
+        self,
+        x: torch.Tensor,
+        lower: torch.Tensor,
+        upper: torch.Tensor,
+        wall_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        x_clamped = torch.min(torch.max(x, lower), upper)
+        if wall_mask is None:
+            return x_clamped
+        mask = wall_mask[:, None].to(dtype=torch.bool, device=x_clamped.device)
+        return torch.where(mask, x, x_clamped)
 
     # ------------------------------------------------------------
     # Wall acceleration (no wall particles)
@@ -831,6 +888,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         v: torch.Tensor,
         nparticles_per_example: torch.Tensor,
         *,
+        particle_types: torch.Tensor | None = None,
         collect_debug: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         edge_index = self._build_edges(x, nparticles_per_example)
@@ -862,6 +920,10 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         if self._include_external_acceleration and self._gravity is not None:
             a = a + self._gravity.to(device=x.device, dtype=x.dtype)
+
+        wall_mask = self._wall_particle_mask(particle_types, x.shape[0], x.device)
+        if wall_mask is not None and self._wall_particles_cfg.zero_wall_acceleration:
+            a = torch.where(wall_mask[:, None], torch.zeros_like(a), a)
 
         if do_collect:
             self._last_debug_stats = self._compute_debug_stats(
@@ -1037,26 +1099,49 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
     # ------------------------------------------------------------
     # Integrator (rollout only)
     def _integrate(
-        self, x: torch.Tensor, v: torch.Tensor, nparticles_per_example: torch.Tensor
+        self,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        nparticles_per_example: torch.Tensor,
+        particle_types: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         dt = self._dt
+        wall_mask = self._wall_particle_mask(particle_types, x.shape[0], x.device)
+        if wall_mask is not None and self._wall_particles_cfg.freeze_walls:
+            v = torch.where(wall_mask[:, None], torch.zeros_like(v), v)
 
         if self._int_cfg.type == "symplectic_euler":
-            _, vdot = self._dynamics(x, v, nparticles_per_example)
+            _, vdot = self._dynamics(
+                x, v, nparticles_per_example, particle_types=particle_types
+            )
             v_new = v + dt * vdot
             x_new = x + dt * v_new
             if self._rollout_reflect_walls:
-                x_new, v_new = self._apply_boundary_conditions(x_new, v_new)
+                x_new, v_new = self._apply_boundary_conditions(
+                    x_new, v_new, mask_exclude=wall_mask
+                )
+            if wall_mask is not None and self._wall_particles_cfg.freeze_walls:
+                x_new = torch.where(wall_mask[:, None], x, x_new)
+                v_new = torch.where(wall_mask[:, None], torch.zeros_like(v_new), v_new)
             return x_new, v_new
 
         # leapfrog
-        _, vdot = self._dynamics(x, v, nparticles_per_example)
+        _, vdot = self._dynamics(
+            x, v, nparticles_per_example, particle_types=particle_types
+        )
         v_half = v + 0.5 * dt * vdot
         x_new = x + dt * v_half
-        _, vdot2 = self._dynamics(x_new, v_half, nparticles_per_example)
+        _, vdot2 = self._dynamics(
+            x_new, v_half, nparticles_per_example, particle_types=particle_types
+        )
         v_new = v_half + 0.5 * dt * vdot2
         if self._rollout_reflect_walls:
-            x_new, v_new = self._apply_boundary_conditions(x_new, v_new)
+            x_new, v_new = self._apply_boundary_conditions(
+                x_new, v_new, mask_exclude=wall_mask
+            )
+        if wall_mask is not None and self._wall_particles_cfg.freeze_walls:
+            x_new = torch.where(wall_mask[:, None], x, x_new)
+            v_new = torch.where(wall_mask[:, None], torch.zeros_like(v_new), v_new)
         return x_new, v_new
 
     # ------------------------------------------------------------
@@ -1068,20 +1153,23 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         particle_types: torch.Tensor,
         material_property: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del particle_types, material_property
+        del material_property
 
         x = current_positions[:, -1].to(self._device)
         prev = current_positions[:, -2].to(self._device)
         v = (x - prev) / max(self._dt, 1e-8)
 
         nparticles_per_example = nparticles_per_example.to(self._device)
+        particle_types = particle_types.to(self._device)
 
         was_training = self.training
         if was_training:
             self.eval()
         try:
             with torch.no_grad():
-                x_new, _ = self._integrate(x, v, nparticles_per_example)
+                x_new, _ = self._integrate(
+                    x, v, nparticles_per_example, particle_types=particle_types
+                )
         finally:
             if was_training:
                 self.train()
@@ -1097,26 +1185,32 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         particle_types: torch.Tensor,
         material_property: torch.Tensor | None,
     ):
-        del particle_types, material_property
+        del material_property
 
         # --- Input world (noisy) ---
         noisy_seq = position_sequence + position_sequence_noise
         boundaries = self._boundaries.to(device=self._device, dtype=noisy_seq.dtype)
         lower, upper = boundaries[:, 0], boundaries[:, 1]
 
-        x = torch.min(torch.max(noisy_seq[:, -1].to(self._device), lower), upper)
-        prev = torch.min(torch.max(noisy_seq[:, -2].to(self._device), lower), upper)
-        next_noisy = torch.min(
-            torch.max((next_positions + position_sequence_noise[:, -1]).to(self._device), lower),
-            upper,
-        )
+        particle_types = particle_types.to(self._device)
+        wall_mask = self._wall_particle_mask(particle_types, noisy_seq.shape[0], self._device)
+
+        x_raw = noisy_seq[:, -1].to(self._device)
+        prev_raw = noisy_seq[:, -2].to(self._device)
+        next_raw = (next_positions + position_sequence_noise[:, -1]).to(self._device)
+
+        x = self._clamp_positions(x_raw, lower, upper, wall_mask)
+        prev = self._clamp_positions(prev_raw, lower, upper, wall_mask)
+        next_noisy = self._clamp_positions(next_raw, lower, upper, wall_mask)
 
         v = (x - prev) / max(self._dt, 1e-8)
 
         nparticles_per_example = nparticles_per_example.to(self._device)
 
         # --- Model predicts instantaneous a(x_t, v_t) ---
-        _, vdot = self._dynamics(x, v, nparticles_per_example)  # (N,dim)
+        _, vdot = self._dynamics(
+            x, v, nparticles_per_example, particle_types=particle_types
+        )  # (N,dim)
         acc = vdot * (self._dt * self._dt)  # (N,dim) == Δv
 
         # normalize
@@ -1157,4 +1251,5 @@ __all__ = [
     "SPHConfig",
     "WallConfig",
     "WallMagnitudeNet",
+    "WallParticleConfig",
 ]

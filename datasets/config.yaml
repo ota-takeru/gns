@@ -13,6 +13,7 @@ gravity: [0.0, -9.81]
 # Sampling density (controls interior and boundary particles)
 particle_density: 50.0 # particles per square unit; larger -> denser
 wall_density_scale: 1.0 # density multiplier for walls (segments)
+wall_particle_layers: 0 # number of wall particle layers (0 disables wall particles)
 visualization_marker_scale: 0.5 # marker size multiplier used in animations
 boundary_clamp_limit: 1.0 # max absolute value after normalizing distance-to-wall features
 
