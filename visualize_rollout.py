@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
+# HTML 埋め込みのサイズ制限を解除する（フレーム数に制限をかけない）
+matplotlib.rcParams["animation.embed_limit"] = 0
+
 
 def _candidate_rollout_roots() -> list[Path]:
     """rolloutファイルの探索ルート候補を集める"""

@@ -143,6 +143,36 @@ def rollout(
             particle_types=particle_types,
             material_property=material_property,
         )
+        if step_idx == 0 and hasattr(core_simulator, "get_last_debug_stats"):
+            debug_stats = core_simulator.get_last_debug_stats()
+            if debug_stats:
+                parts = []
+                pair_count = debug_stats.get("pair_count")
+                neigh_mean = debug_stats.get("neighbor_edges_mean")
+                neigh_max = debug_stats.get("neighbor_edges_max")
+                phi_mean = debug_stats.get("phi_mean")
+                phi_max = debug_stats.get("phi_max")
+                alpha_mean = debug_stats.get("alpha_mean")
+                alpha_max = debug_stats.get("alpha_max")
+                dist_mean = debug_stats.get("dist_mean")
+                dist_max = debug_stats.get("dist_max")
+                w_mean = debug_stats.get("w_mean")
+                w_max = debug_stats.get("w_max")
+                w_min = debug_stats.get("w_min")
+                if pair_count is not None:
+                    parts.append(f"pairs={pair_count:.0f}")
+                if neigh_mean is not None and neigh_max is not None:
+                    parts.append(f"edges={neigh_mean:.2f}/{neigh_max:.0f}")
+                if dist_mean is not None and dist_max is not None:
+                    parts.append(f"dist={dist_mean:.3e}/{dist_max:.3e}")
+                if w_mean is not None and w_max is not None and w_min is not None:
+                    parts.append(f"w={w_mean:.3e}/{w_max:.3e}/{w_min:.3e}")
+                if phi_mean is not None and phi_max is not None:
+                    parts.append(f"phi={phi_mean:.3e}/{phi_max:.3e}")
+                if alpha_mean is not None and alpha_max is not None:
+                    parts.append(f"alpha={alpha_mean:.3e}/{alpha_max:.3e}")
+                if parts:
+                    print("[rollout][debug]", " ".join(parts))
         kinematic_mask = (particle_types == KINEMATIC_PARTICLE_ID).to(device)
         next_position_gt = ground_truth_positions[:, step_idx]
         kinematic_mask = kinematic_mask.bool()[:, None].expand(-1, current_positions.shape[-1])

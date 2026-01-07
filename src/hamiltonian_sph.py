@@ -987,6 +987,22 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         alpha_abs = alpha_vals.detach() if alpha_vals is not None else None
         stats["alpha_mean"], stats["alpha_max"] = _mean_and_max(alpha_abs)
 
+        # pair geometry stats
+        if pair_geom is not None:
+            dist = pair_geom[2].detach()
+            w = pair_geom[4].detach()
+            stats["pair_count"] = float(dist.numel())
+            stats["dist_mean"], stats["dist_max"] = _mean_and_max(dist)
+            stats["w_mean"], stats["w_max"] = _mean_and_max(w)
+            stats["w_min"] = float(w.min().item()) if w.numel() > 0 else None
+        else:
+            stats["pair_count"] = 0.0
+            stats["dist_mean"] = None
+            stats["dist_max"] = None
+            stats["w_mean"] = None
+            stats["w_max"] = None
+            stats["w_min"] = None
+
         # proxy density stats (optional)
         if rho is not None and rho.numel() > 0 and x is not None:
             rho_det = rho.detach()
