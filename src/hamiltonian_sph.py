@@ -991,6 +991,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             torch.Tensor,
         ]
         | None = None,
+        vel_hist_mean: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | None]]:
         geom = pair_geom if pair_geom is not None else self._pair_geometry(x, edge_index)
         if geom is None:
@@ -1010,7 +1011,16 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         )
         s_used = s_scaled * self._vel_scale
 
-        alpha = self._alpha_net(dist=dist, s_abs=torch.abs(s_used))  # >=0
+        # velocity 履歴（5 ステップ）に基づきダンピング係数を緩やかにスケール
+        # gate は [0.5, 1.0) に収まり、低速時の過剰減衰を抑える
+        if vel_hist_mean is not None:
+            hist = 0.5 * (vel_hist_mean[i_idx] + vel_hist_mean[j_idx])
+            hist_scaled = torch.tanh(hist / (self._vel_scale + 1e-12))
+            gate = 0.5 + 0.5 * hist_scaled  # 0.5〜1.0
+        else:
+            gate = 1.0
+
+        alpha = self._alpha_net(dist=dist, s_abs=torch.abs(s_used)) * gate  # >=0
         w = self._cutoff_weight(dist)
         delta = (w * (alpha / max(self._dt, 1e-8)) * s_used).unsqueeze(-1) * r_hat
 
@@ -1019,7 +1029,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         a = a.index_add(0, j_idx, -delta)
         if not collect_debug:
             return a
-        return a, {"alpha": alpha, "dist": dist}
+        return a, {"alpha": alpha, "dist": dist, "damp_gate": gate}
 
     def _pressure_acc(
         self,
@@ -1160,6 +1170,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         *,
         particle_types: torch.Tensor | None = None,
         collect_debug: bool | None = None,
+        vel_hist_mean: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         edge_index = self._build_edges(x, nparticles_per_example)
         pair_geom = self._pair_geometry(x, edge_index)
@@ -1218,7 +1229,12 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         if tcfg.enable_damping and (tcfg.w_damping != 0.0):
             diss_out = self._dissipative_acc(
-                x=x, v=v, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
+                x=x,
+                v=v,
+                edge_index=edge_index,
+                collect_debug=do_collect,
+                pair_geom=pair_geom,
+                vel_hist_mean=vel_hist_mean,
             )
             if do_collect:
                 a_damp, diss_dbg = diss_out  # type: ignore[assignment]
@@ -1463,6 +1479,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         v: torch.Tensor,
         nparticles_per_example: torch.Tensor,
         particle_types: torch.Tensor | None = None,
+        *,
+        vel_hist_mean: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         dt = self._dt
         wall_mask = self._wall_particle_mask(particle_types, x.shape[0], x.device)
@@ -1471,7 +1489,11 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         if self._int_cfg.type == "symplectic_euler":
             _, vdot = self._dynamics(
-                x, v, nparticles_per_example, particle_types=particle_types
+                x,
+                v,
+                nparticles_per_example,
+                particle_types=particle_types,
+                vel_hist_mean=vel_hist_mean,
             )
             v_new = v + dt * vdot
             x_new = x + dt * v_new
@@ -1486,12 +1508,20 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         # leapfrog
         _, vdot = self._dynamics(
-            x, v, nparticles_per_example, particle_types=particle_types
+            x,
+            v,
+            nparticles_per_example,
+            particle_types=particle_types,
+            vel_hist_mean=vel_hist_mean,
         )
         v_half = v + 0.5 * dt * vdot
         x_new = x + dt * v_half
         _, vdot2 = self._dynamics(
-            x_new, v_half, nparticles_per_example, particle_types=particle_types
+            x_new,
+            v_half,
+            nparticles_per_example,
+            particle_types=particle_types,
+            vel_hist_mean=vel_hist_mean,
         )
         v_new = v_half + 0.5 * dt * vdot2
         if self._rollout_reflect_walls:
@@ -1517,6 +1547,10 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         x = current_positions[:, -1].to(self._device)
         prev = current_positions[:, -2].to(self._device)
         v = (x - prev) / max(self._dt, 1e-8)
+        # 直近 5 ステップの速度ノルム平均を計算（ダンピング用ゲート）
+        with torch.no_grad():
+            vel_hist = (current_positions[:, 1:] - current_positions[:, :-1]).to(self._device)
+            vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1)
 
         nparticles_per_example = nparticles_per_example.to(self._device)
         particle_types = particle_types.to(self._device)
@@ -1527,7 +1561,11 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         try:
             with torch.no_grad():
                 x_new, _ = self._integrate(
-                    x, v, nparticles_per_example, particle_types=particle_types
+                    x,
+                    v,
+                    nparticles_per_example,
+                    particle_types=particle_types,
+                    vel_hist_mean=vel_hist_mean,
                 )
         finally:
             if was_training:
@@ -1569,12 +1607,18 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         next_noisy = self._clamp_positions(next_raw, lower, upper, wall_mask)
 
         v = (x - prev) / max(self._dt, 1e-8)
+        vel_hist = (noisy_seq[:, 1:] - noisy_seq[:, :-1]).to(self._device)
+        vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1)
 
         nparticles_per_example = nparticles_per_example.to(self._device)
 
         # --- Model predicts instantaneous a(x_t, v_t) ---
         _, vdot = self._dynamics(
-            x, v, nparticles_per_example, particle_types=particle_types
+            x,
+            v,
+            nparticles_per_example,
+            particle_types=particle_types,
+            vel_hist_mean=vel_hist_mean,
         )  # (N,dim)
         acc = vdot * (self._dt * self._dt)  # (N,dim) == Δv
 
