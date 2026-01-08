@@ -7,7 +7,7 @@ scenario_options:
   rigid:
     dataset: ./datasets/out
   fluid:
-    dataset: ./datasets/out_fluid/dam_break_left
+    dataset: ./datasets/out_fluid/dam_break_left_wall2
     rollout_dataset: valid
 method: hamiltonian_sph
 method_options:
@@ -31,7 +31,7 @@ method_options:
       s_clip_scaled: 5.0
     terms:
       enable_central: true
-      enable_pressure: true
+      enable_pressure: false
       enable_contact: true
       enable_damping: true
       w_central: 1.0
