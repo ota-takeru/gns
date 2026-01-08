@@ -18,8 +18,7 @@ class BaseSimulator(nn.Module, ABC):
         nparticles_per_example: torch.Tensor,
         particle_types: torch.Tensor,
         material_property: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        ...
+    ) -> torch.Tensor: ...
 
     @abstractmethod
     def predict_accelerations(
@@ -30,8 +29,7 @@ class BaseSimulator(nn.Module, ABC):
         nparticles_per_example: torch.Tensor,
         particle_types: torch.Tensor,
         material_property: torch.Tensor | None,
-    ):
-        ...
+    ): ...
 
     # DDP で forward 経由でも呼び出せるように predict_accelerations を委譲
     def forward(
@@ -53,12 +51,10 @@ class BaseSimulator(nn.Module, ABC):
         )
 
     @abstractmethod
-    def save(self, path: str = "model.pt"):
-        ...
+    def save(self, path: str = "model.pt"): ...
 
     @abstractmethod
-    def load(self, path: str):
-        ...
+    def load(self, path: str): ...
 
 
 class GNSSimulator(BaseSimulator):
@@ -146,7 +142,7 @@ class GNSSimulator(BaseSimulator):
                 r=radius,
                 batch=batch_ids,
                 loop=add_self_edges,
-                max_num_neighbors=128,
+                max_num_neighbors=64,
             )
             receivers = edge_index[0, :]
             senders = edge_index[1, :]
@@ -253,9 +249,7 @@ class GNSSimulator(BaseSimulator):
         flat_velocity_sequence = normalized_velocity_sequence.view(nparticles, -1)
         node_features_list.append(flat_velocity_sequence)
 
-        boundaries = (
-            torch.tensor(self._boundaries, requires_grad=False).float().to(self._device)
-        )
+        boundaries = torch.tensor(self._boundaries, requires_grad=False).float().to(self._device)
         distance_to_lower_boundary = most_recent_position - boundaries[:, 0][None]
         distance_to_upper_boundary = boundaries[:, 1][None] - most_recent_position
         distance_to_boundaries = torch.cat(
@@ -303,9 +297,9 @@ class GNSSimulator(BaseSimulator):
         self, normalized_acceleration: torch.Tensor, position_sequence: torch.Tensor
     ) -> torch.Tensor:  # 正規化された加速度から次の位置を計算
         acceleration_stats = self._normalization_stats["acceleration"]
-        acceleration = (
-            normalized_acceleration * acceleration_stats["std"]
-        ) + acceleration_stats["mean"]
+        acceleration = (normalized_acceleration * acceleration_stats["std"]) + acceleration_stats[
+            "mean"
+        ]
 
         most_recent_position = position_sequence[:, -1]
         most_recent_velocity = position_sequence[:, -1] - position_sequence[:, -2]
@@ -324,9 +318,9 @@ class GNSSimulator(BaseSimulator):
 
         # 正規化
         acceleration_stats = self._normalization_stats["acceleration"]
-        normalized_acceleration = (
-            acceleration - acceleration_stats["mean"]
-        ) / acceleration_stats["std"]
+        normalized_acceleration = (acceleration - acceleration_stats["mean"]) / acceleration_stats[
+            "std"
+        ]
         return normalized_acceleration
 
     def predict_positions(

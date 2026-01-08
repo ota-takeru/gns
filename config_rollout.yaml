@@ -12,11 +12,11 @@ scenario_options:
 method: hamiltonian_sph
 method_options:
   hamiltonian_sph:
-    particle_mass: null            # 未指定ならメタデータから自動推定
+    particle_mass: null # 未指定ならメタデータから自動推定
     sph:
       # 学習設定と揃えて近傍数を ~20 に増やす
-      smoothing_length: 0.16       # 2*h がカットオフ半径（約0.32）
-      max_num_neighbors: 128
+      smoothing_length: 0.16 # 2*h がカットオフ半径（約0.32）
+      max_num_neighbors: 64
     conservative:
       mlp_layers: 2
       mlp_hidden_dim: 128
@@ -29,6 +29,29 @@ method_options:
       dropout: 0.0
       alpha_max: 1.0
       s_clip_scaled: 5.0
+    terms:
+      enable_central: true
+      enable_pressure: true
+      enable_contact: true
+      enable_damping: true
+      w_central: 1.0
+      w_pressure: 1.0
+      w_contact: 1.0
+      w_damping: 1.0
+    pressure:
+      enabled: true
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      dropout: 0.0
+      rep_max_multiplier: 2.0
+      use_compression_gate: true
+    contact:
+      enabled: true
+      mlp_layers: 2
+      mlp_hidden_dim: 128
+      dropout: 0.0
+      alpha_max: 10.0
+      s_clip_scaled: 50.0
     wall:
       enabled: false # 壁MLP項を無効化（壁由来の加速度をオフ）
     wall_particles:
@@ -42,11 +65,11 @@ method_options:
       kind: cosine
     integrator:
       dt: 0.006
-      type: symplectic_euler               # leapfrog|symplectic_euler
-    gravity: [0.0, -9.81]          # 2D データセットに合わせる
+      type: symplectic_euler # leapfrog|symplectic_euler
+    gravity: [0.0, -9.81] # 2D データセットに合わせる
     include_external_acceleration: true
-    pos_feature_scale: null        # null で半径を使用
-    vel_feature_scale: null        # null で pos_feature_scale/dt
+    pos_feature_scale: null # null で半径を使用
+    vel_feature_scale: null # null で pos_feature_scale/dt
 model_path: ./models/ # 学習済みモデルの格納先
 # Kaggle で Add data を使う場合は /kaggle/input/<dataset-name>/models などに置き換える
 output_path: ./rollouts/ # 推論結果(pklなど)の出力先

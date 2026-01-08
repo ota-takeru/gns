@@ -6,7 +6,10 @@ from hamiltonian_sph import (
     CutoffConfig,
     DissipationConfig,
     IntegratorConfig,
+    ContactConfig,
+    PressureConfig,
     SPHConfig,
+    TermConfig,
     WallConfig,
     WallParticleConfig,
 )
@@ -152,6 +155,44 @@ def _get_simulator(
             allowed_keys={"mlp_layers", "mlp_hidden_dim", "dropout", "alpha_max", "s_clip_scaled"},
             label="dissipation",
         )
+        method_options["terms"] = _sanitize_dict(
+            method_options.get("terms"),
+            allowed_keys={
+                "enable_central",
+                "enable_pressure",
+                "enable_contact",
+                "enable_damping",
+                "w_central",
+                "w_pressure",
+                "w_contact",
+                "w_damping",
+            },
+            label="terms",
+        )
+        method_options["pressure"] = _sanitize_dict(
+            method_options.get("pressure"),
+            allowed_keys={
+                "enabled",
+                "mlp_layers",
+                "mlp_hidden_dim",
+                "dropout",
+                "rep_max_multiplier",
+                "use_compression_gate",
+            },
+            label="pressure",
+        )
+        method_options["contact"] = _sanitize_dict(
+            method_options.get("contact"),
+            allowed_keys={
+                "enabled",
+                "mlp_layers",
+                "mlp_hidden_dim",
+                "dropout",
+                "alpha_max",
+                "s_clip_scaled",
+            },
+            label="contact",
+        )
         method_options["wall"] = _sanitize_dict(
             method_options.get("wall"),
             allowed_keys={
@@ -187,6 +228,9 @@ def _get_simulator(
         method_options["sph"] = _maybe(SPHConfig, "sph")
         method_options["conservative"] = _maybe(ConservativeConfig, "conservative")
         method_options["dissipation"] = _maybe(DissipationConfig, "dissipation")
+        method_options["terms"] = _maybe(TermConfig, "terms")
+        method_options["pressure"] = _maybe(PressureConfig, "pressure")
+        method_options["contact"] = _maybe(ContactConfig, "contact")
         method_options["wall"] = _maybe(WallConfig, "wall")
         method_options["wall_particles"] = _maybe(WallParticleConfig, "wall_particles")
         method_options["cutoff"] = _maybe(CutoffConfig, "cutoff")
@@ -196,6 +240,9 @@ def _get_simulator(
             "sph",
             "conservative",
             "dissipation",
+            "terms",
+            "pressure",
+            "contact",
             "wall",
             "wall_particles",
             "cutoff",

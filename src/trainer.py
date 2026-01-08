@@ -565,12 +565,24 @@ def train(cfg: Config, device: torch.device):
                 phi_max = last_batch_debug_stats.get("phi_max")
                 alpha_mean = last_batch_debug_stats.get("alpha_mean")
                 alpha_max = last_batch_debug_stats.get("alpha_max")
+                pair_count = last_batch_debug_stats.get("pair_count")
+                dist_mean = last_batch_debug_stats.get("dist_mean")
+                dist_max = last_batch_debug_stats.get("dist_max")
+                w_mean = last_batch_debug_stats.get("w_mean")
+                w_max = last_batch_debug_stats.get("w_max")
+                w_min = last_batch_debug_stats.get("w_min")
                 if pair_mean is not None and pair_max is not None:
                     log_parts.append(f"|a_pair|={pair_mean:.4e}/{pair_max:.4e}")
                 if wall_mean is not None and wall_max is not None:
                     log_parts.append(f"|a_wall|={wall_mean:.4e}/{wall_max:.4e}")
                 if neigh_mean is not None and neigh_max is not None:
                     log_parts.append(f"edges={neigh_mean:.2f}/{neigh_max:.0f}")
+                if pair_count is not None:
+                    log_parts.append(f"pairs={pair_count:.0f}")
+                if dist_mean is not None and dist_max is not None:
+                    log_parts.append(f"dist={dist_mean:.3e}/{dist_max:.3e}")
+                if w_mean is not None and w_max is not None and w_min is not None:
+                    log_parts.append(f"w={w_mean:.3e}/{w_max:.3e}/{w_min:.3e}")
                 if min_d is not None:
                     log_parts.append(f"min_d={min_d:.3e}")
                 if min_d_edges is not None:
@@ -634,6 +646,12 @@ def train(cfg: Config, device: torch.device):
                     ("a_pair_abs_max", "train/a_pair_max"),
                     ("a_wall_abs_mean", "train/a_wall_mean"),
                     ("a_wall_abs_max", "train/a_wall_max"),
+                    ("pair_count", "train/pair_count"),
+                    ("dist_mean", "train/pair_dist_mean"),
+                    ("dist_max", "train/pair_dist_max"),
+                    ("w_mean", "train/cutoff_w_mean"),
+                    ("w_max", "train/cutoff_w_max"),
+                    ("w_min", "train/cutoff_w_min"),
                     ("neighbor_edges_mean", "train/neighbor_edges_mean"),
                     ("neighbor_edges_max", "train/neighbor_edges_max"),
                     ("min_d", "train/min_distance"),

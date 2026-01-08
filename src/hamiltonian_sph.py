@@ -94,6 +94,45 @@ class DissipationConfig:
 
 
 @dataclass
+class TermConfig:
+    """Ablation switches / weights for pairwise terms."""
+
+    enable_central: bool = True
+    enable_pressure: bool = False
+    enable_contact: bool = False
+    enable_damping: bool = True
+
+    w_central: float = 1.0
+    w_pressure: float = 1.0
+    w_contact: float = 1.0
+    w_damping: float = 1.0
+
+
+@dataclass
+class PressureConfig:
+    """Density-based repulsive magnitude (pressure-like) term."""
+
+    enabled: bool = False
+    mlp_layers: int = 2
+    mlp_hidden_dim: int = 128
+    dropout: float = 0.0
+    rep_max_multiplier: float = 2.0
+    use_compression_gate: bool = True
+
+
+@dataclass
+class ContactConfig:
+    """Approaching-only impulse term."""
+
+    enabled: bool = False
+    mlp_layers: int = 2
+    mlp_hidden_dim: int = 128
+    dropout: float = 0.0
+    alpha_max: float = 10.0
+    s_clip_scaled: float = 50.0
+
+
+@dataclass
 class WallConfig:
     """Wall-MLP settings (no wall particles).
 
@@ -271,6 +310,85 @@ class PairDissipationAlphaNet(nn.Module):
         return self._alpha_max * torch.sigmoid(raw)
 
 
+class PairPressureRepulsionNet(nn.Module):
+    """rep = f(d, rho_rel_avg, rho_rel_diff) -> nonnegative repulsive magnitude"""
+
+    def __init__(
+        self,
+        cfg: PressureConfig,
+        *,
+        pos_scale: float,
+        dt: float,
+        typical_acc: float | None = None,
+    ) -> None:
+        super().__init__()
+        self._pos_scale = float(pos_scale)
+        self._dt = float(dt)
+        self._drop = nn.Dropout(cfg.dropout)
+
+        a_typ = (
+            float(typical_acc)
+            if typical_acc is not None
+            else (self._pos_scale / max(self._dt * self._dt, 1e-12))
+        )
+        self._rep_max = float(cfg.rep_max_multiplier) * a_typ
+
+        self._mlp = graph_network.build_mlp(
+            input_size=3,  # [d_scaled, rho_rel_avg, rho_rel_diff]
+            hidden_layer_sizes=[cfg.mlp_hidden_dim for _ in range(cfg.mlp_layers)],
+            output_size=1,
+            activation=nn.SiLU,
+            output_activation=nn.Identity,
+        )
+
+    def forward(
+        self,
+        *,
+        dist: torch.Tensor,
+        rho_rel_avg: torch.Tensor,
+        rho_rel_diff: torch.Tensor,
+    ) -> torch.Tensor:
+        d_scaled = (dist / (self._pos_scale + 1e-12)).unsqueeze(-1)
+        x = torch.cat(
+            [d_scaled, rho_rel_avg.unsqueeze(-1), rho_rel_diff.unsqueeze(-1)],
+            dim=-1,
+        )
+        x = self._drop(x)
+        raw = self._mlp(x).squeeze(-1)
+        return self._rep_max * torch.sigmoid(raw)
+
+
+class PairContactAlphaNet(nn.Module):
+    """alpha_contact = g(d, s_neg) in [0, alpha_max]"""
+
+    def __init__(self, cfg: ContactConfig, *, pos_scale: float, vel_scale: float) -> None:
+        super().__init__()
+        self._pos_scale = float(pos_scale)
+        self._vel_scale = float(vel_scale)
+        self._alpha_max = float(cfg.alpha_max)
+        self._drop = nn.Dropout(cfg.dropout)
+
+        self._mlp = graph_network.build_mlp(
+            input_size=2,  # [d_scaled, s_neg_scaled]
+            hidden_layer_sizes=[cfg.mlp_hidden_dim for _ in range(cfg.mlp_layers)],
+            output_size=1,
+            activation=nn.SiLU,
+            output_activation=nn.Identity,
+        )
+
+    def forward(self, *, dist: torch.Tensor, s_neg: torch.Tensor) -> torch.Tensor:
+        x = torch.cat(
+            [
+                (dist / (self._pos_scale + 1e-12)).unsqueeze(-1),
+                (s_neg / (self._vel_scale + 1e-12)).unsqueeze(-1),
+            ],
+            dim=-1,
+        )
+        x = self._drop(x)
+        raw = self._mlp(x).squeeze(-1)
+        return self._alpha_max * torch.sigmoid(raw)
+
+
 class WallMagnitudeNet(nn.Module):
     """mag = near(d) * a_wall_max * sigmoid(raw(d, v_toward))
 
@@ -367,6 +485,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         pos_feature_scale: float | None = None,
         vel_feature_scale: float | None = None,
         include_external_acceleration: bool = True,
+        terms: TermConfig | None = None,
+        pressure: PressureConfig | None = None,
+        contact: ContactConfig | None = None,
         rollout_reflect_walls: bool = True,
     ) -> None:
         super().__init__()
@@ -434,6 +555,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         self._wall_particles_cfg = _coerce(
             wall_particles, WallParticleConfig, WallParticleConfig()
         )
+        self._terms_cfg = _coerce(terms, TermConfig, TermConfig())
+        self._pressure_cfg = _coerce(pressure, PressureConfig, PressureConfig())
+        self._contact_cfg = _coerce(contact, ContactConfig, ContactConfig())
         self._use_density = bool(getattr(self._cons_cfg, "use_density", False))
 
         # Scales for stable feature scaling
@@ -471,6 +595,23 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             pos_scale=self._pos_scale,
             vel_scale=self._vel_scale,
         ).to(self._device)
+
+        self._pressure_net: PairPressureRepulsionNet | None = None
+        if self._pressure_cfg.enabled:
+            self._pressure_net = PairPressureRepulsionNet(
+                cfg=self._pressure_cfg,
+                pos_scale=self._pos_scale,
+                dt=self._dt,
+                typical_acc=self._typical_acc if self._typical_acc > 0 else None,
+            ).to(self._device)
+
+        self._contact_alpha_net: PairContactAlphaNet | None = None
+        if self._contact_cfg.enabled:
+            self._contact_alpha_net = PairContactAlphaNet(
+                cfg=self._contact_cfg,
+                pos_scale=self._pos_scale,
+                vel_scale=self._vel_scale,
+            ).to(self._device)
 
         # Wall net (no wall particles)
         if self._wall_particles_cfg.enabled and self._wall_particles_cfg.disable_wall_mlp:
@@ -880,6 +1021,135 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             return a
         return a, {"alpha": alpha, "dist": dist}
 
+    def _pressure_acc(
+        self,
+        *,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        collect_debug: bool = False,
+        pair_geom: tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+        | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | float | None]]:
+        if self._pressure_net is None:
+            zero = torch.zeros_like(x)
+            return (
+                (zero, {"rep": None, "rho_rel": None, "rho_scale": None, "comp_gate_mean": None})
+                if collect_debug
+                else zero
+            )
+
+        geom = pair_geom if pair_geom is not None else self._pair_geometry(x, edge_index)
+        if geom is None:
+            zero = torch.zeros_like(x)
+            return (
+                (zero, {"rep": None, "rho_rel": None, "rho_scale": None, "comp_gate_mean": None})
+                if collect_debug
+                else zero
+            )
+
+        pairs, _, dist, r_hat, w = geom
+        i_idx, j_idx = pairs
+
+        rho = self._proxy_density(pairs=pairs, w=w, num_nodes=x.shape[0])
+        rho_mean = rho.detach().mean()
+        decay = 0.99
+        if self.training:
+            self._rho_ema.mul_(decay).add_((1.0 - decay) * rho_mean)
+        rho_scale = torch.clamp(self._rho_ema.to(rho.device, rho.dtype), min=1e-6)
+
+        rho_rel = rho / rho_scale - 1.0
+        rho_rel_avg = 0.5 * (rho_rel[i_idx] + rho_rel[j_idx])
+        rho_rel_diff = torch.abs(rho_rel[i_idx] - rho_rel[j_idx])
+
+        rep = self._pressure_net(dist=dist, rho_rel_avg=rho_rel_avg, rho_rel_diff=rho_rel_diff)
+
+        comp_gate_mean: float | None = None
+        if self._pressure_cfg.use_compression_gate:
+            comp_gate = torch.relu(rho_rel_avg)
+            rep = rep * comp_gate
+            comp_gate_mean = (
+                float(comp_gate.detach().mean().item()) if comp_gate.numel() > 0 else None
+            )
+
+        delta = (w * rep).unsqueeze(-1) * r_hat
+        a = torch.zeros_like(x)
+        a = a.index_add(0, i_idx, -delta)
+        a = a.index_add(0, j_idx, +delta)
+
+        if not collect_debug:
+            return a
+        return a, {
+            "rep": w * rep,
+            "rho_rel": rho_rel,
+            "rho_scale": rho_scale,
+            "comp_gate_mean": comp_gate_mean,
+        }
+
+    def _contact_acc(
+        self,
+        *,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        edge_index: torch.Tensor,
+        collect_debug: bool = False,
+        pair_geom: tuple[
+            tuple[torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+        | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | float | None]]:
+        if self._contact_alpha_net is None:
+            zero = torch.zeros_like(v)
+            return (
+                (zero, {"alpha_contact": None, "s_neg": None, "active_rate": None})
+                if collect_debug
+                else zero
+            )
+
+        geom = pair_geom if pair_geom is not None else self._pair_geometry(x, edge_index)
+        if geom is None:
+            zero = torch.zeros_like(v)
+            return (
+                (zero, {"alpha_contact": None, "s_neg": None, "active_rate": None})
+                if collect_debug
+                else zero
+            )
+
+        pairs, _, dist, r_hat, w = geom
+        i_idx, j_idx = pairs
+
+        v_rel = v[j_idx] - v[i_idx]
+        s = (v_rel * r_hat).sum(dim=-1)
+        s_neg = torch.relu(-s)
+
+        s_scaled = s_neg / max(self._vel_scale, 1e-12)
+        s_scaled = torch.clamp(s_scaled, 0.0, self._contact_cfg.s_clip_scaled)
+        s_used = s_scaled * self._vel_scale
+
+        alpha = self._contact_alpha_net(dist=dist, s_neg=s_used)
+        mag = w * (alpha / max(self._dt, 1e-8)) * s_used
+        delta = mag.unsqueeze(-1) * r_hat
+        a = torch.zeros_like(v)
+        a = a.index_add(0, i_idx, -delta)
+        a = a.index_add(0, j_idx, +delta)
+
+        if not collect_debug:
+            return a
+
+        active_rate = (
+            float((s_neg.detach() > 0).float().mean().item()) if s_neg.numel() > 0 else None
+        )
+        return a, {"alpha_contact": alpha, "s_neg": s_used, "active_rate": active_rate}
+
     # ------------------------------------------------------------
     # Dynamics
     def _dynamics(
@@ -895,28 +1165,75 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         pair_geom = self._pair_geometry(x, edge_index)
 
         do_collect = self._record_debug_stats if collect_debug is None else collect_debug
+        tcfg = self._terms_cfg
 
-        cons_out = self._conservative_acc(
-            x=x, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
-        )
-        if do_collect:
-            a_cons, cons_dbg = cons_out  # type: ignore[assignment]
+        if tcfg.enable_central and (tcfg.w_central != 0.0):
+            cons_out = self._conservative_acc(
+                x=x, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
+            )
+            if do_collect:
+                a_central, cons_dbg = cons_out  # type: ignore[assignment]
+            else:
+                a_central = cons_out  # type: ignore[assignment]
+                cons_dbg = {"phi": None, "dist": None, "rho": None, "rho_scale": None}
+            a_central_w = a_central * float(tcfg.w_central)
         else:
-            a_cons = cons_out  # type: ignore[assignment]
+            a_central_w = torch.zeros_like(x)
             cons_dbg = {"phi": None, "dist": None, "rho": None, "rho_scale": None}
 
-        diss_out = self._dissipative_acc(
-            x=x, v=v, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
-        )
-        if do_collect:
-            a_diss, diss_dbg = diss_out  # type: ignore[assignment]
+        press_dbg: dict[str, torch.Tensor | float | None] = {
+            "rep": None,
+            "rho_rel": None,
+            "rho_scale": None,
+            "comp_gate_mean": None,
+        }
+        if tcfg.enable_pressure and (tcfg.w_pressure != 0.0):
+            pres_out = self._pressure_acc(
+                x=x, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
+            )
+            if do_collect:
+                a_pressure, press_dbg = pres_out  # type: ignore[assignment]
+            else:
+                a_pressure = pres_out  # type: ignore[assignment]
+            a_pressure_w = a_pressure * float(tcfg.w_pressure)
         else:
-            a_diss = diss_out  # type: ignore[assignment]
+            a_pressure_w = torch.zeros_like(x)
+
+        contact_dbg: dict[str, torch.Tensor | float | None] = {
+            "alpha_contact": None,
+            "s_neg": None,
+            "active_rate": None,
+        }
+        if tcfg.enable_contact and (tcfg.w_contact != 0.0):
+            con_out = self._contact_acc(
+                x=x, v=v, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
+            )
+            if do_collect:
+                a_contact, contact_dbg = con_out  # type: ignore[assignment]
+            else:
+                a_contact = con_out  # type: ignore[assignment]
+            a_contact_w = a_contact * float(tcfg.w_contact)
+        else:
+            a_contact_w = torch.zeros_like(v)
+
+        if tcfg.enable_damping and (tcfg.w_damping != 0.0):
+            diss_out = self._dissipative_acc(
+                x=x, v=v, edge_index=edge_index, collect_debug=do_collect, pair_geom=pair_geom
+            )
+            if do_collect:
+                a_damp, diss_dbg = diss_out  # type: ignore[assignment]
+            else:
+                a_damp = diss_out  # type: ignore[assignment]
+                diss_dbg = {"alpha": None, "dist": None}
+            a_damp_w = a_damp * float(tcfg.w_damping)
+        else:
+            a_damp_w = torch.zeros_like(v)
             diss_dbg = {"alpha": None, "dist": None}
 
         a_wall = self._wall_acc(x, v)
 
-        a = a_cons + a_diss + a_wall
+        a_pair = a_central_w + a_pressure_w + a_contact_w + a_damp_w
+        a = a_pair + a_wall
 
         if self._include_external_acceleration and self._gravity is not None:
             a = a + self._gravity.to(device=x.device, dtype=x.dtype)
@@ -927,9 +1244,15 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         if do_collect:
             self._last_debug_stats = self._compute_debug_stats(
-                a_pair=a_cons + a_diss,
+                a_pair=a_pair,
                 a_wall=a_wall,
+                a_central=a_central_w,
+                a_pressure=a_pressure_w,
+                a_contact=a_contact_w,
+                a_damping=a_damp_w,
                 cons_dbg=cons_dbg,
+                press_dbg=press_dbg,
+                contact_dbg=contact_dbg,
                 diss_dbg=diss_dbg,
                 rho=cons_dbg.get("rho"),
                 x=x,
@@ -947,7 +1270,13 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         *,
         a_pair: torch.Tensor,
         a_wall: torch.Tensor,
+        a_central: torch.Tensor | None,
+        a_pressure: torch.Tensor | None,
+        a_contact: torch.Tensor | None,
+        a_damping: torch.Tensor | None,
         cons_dbg: dict[str, torch.Tensor | None],
+        press_dbg: dict[str, torch.Tensor | float | None],
+        contact_dbg: dict[str, torch.Tensor | float | None],
         diss_dbg: dict[str, torch.Tensor | None],
         rho: torch.Tensor | None,
         x: torch.Tensor | None,
@@ -968,39 +1297,73 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             t_det = t.detach()
             return float(t_det.mean().item()), float(t_det.max().item())
 
+        def _vec_mag_stats(vec: torch.Tensor | None) -> tuple[float | None, float | None]:
+            if vec is None or vec.numel() == 0:
+                return None, None
+            mag = torch.linalg.norm(vec.detach(), dim=-1)
+            return _mean_and_max(mag)
+
         stats: dict[str, float | None] = {}
-        # |a_pair|
-        pair_mag = torch.linalg.norm(a_pair.detach(), dim=-1) if a_pair.numel() > 0 else None
-        stats["a_pair_abs_mean"], stats["a_pair_abs_max"] = _mean_and_max(pair_mag)
 
-        # |a_wall|
-        wall_mag = torch.linalg.norm(a_wall.detach(), dim=-1) if a_wall.numel() > 0 else None
-        stats["a_wall_abs_mean"], stats["a_wall_abs_max"] = _mean_and_max(wall_mag)
+        stats["a_pair_abs_mean"], stats["a_pair_abs_max"] = _vec_mag_stats(a_pair)
+        stats["a_wall_abs_mean"], stats["a_wall_abs_max"] = _vec_mag_stats(a_wall)
 
-        # phi(dist) (cutoff を掛けたものの絶対値)
+        stats["a_central_abs_mean"], stats["a_central_abs_max"] = _vec_mag_stats(a_central)
+        stats["a_pressure_abs_mean"], stats["a_pressure_abs_max"] = _vec_mag_stats(a_pressure)
+        stats["a_contact_abs_mean"], stats["a_contact_abs_max"] = _vec_mag_stats(a_contact)
+        stats["a_damping_abs_mean"], stats["a_damping_abs_max"] = _vec_mag_stats(a_damping)
+
         phi_vals = cons_dbg.get("phi") if cons_dbg is not None else None
         phi_abs = phi_vals.detach().abs() if phi_vals is not None else None
         stats["phi_mean"], stats["phi_max"] = _mean_and_max(phi_abs)
 
-        # alpha
-        alpha_vals = diss_dbg.get("alpha") if diss_dbg is not None else None
-        alpha_abs = alpha_vals.detach() if alpha_vals is not None else None
-        stats["alpha_mean"], stats["alpha_max"] = _mean_and_max(alpha_abs)
+        rep_vals = press_dbg.get("rep")
+        rep_abs = rep_vals.detach().abs() if isinstance(rep_vals, torch.Tensor) else None
+        stats["rep_mean"], stats["rep_max"] = _mean_and_max(rep_abs)
+        stats["pressure_comp_gate_mean"] = (
+            float(press_dbg["comp_gate_mean"])
+            if press_dbg.get("comp_gate_mean") is not None
+            else None
+        )
 
-        # proxy density stats (optional)
+        alpha_c = contact_dbg.get("alpha_contact")
+        alpha_c_t = alpha_c.detach() if isinstance(alpha_c, torch.Tensor) else None
+        stats["alpha_contact_mean"], stats["alpha_contact_max"] = _mean_and_max(alpha_c_t)
+        stats["contact_active_rate"] = (
+            float(contact_dbg["active_rate"]) if contact_dbg.get("active_rate") is not None else None
+        )
+
+        alpha_vals = diss_dbg.get("alpha") if diss_dbg is not None else None
+        alpha_t = alpha_vals.detach() if alpha_vals is not None else None
+        stats["alpha_mean"], stats["alpha_max"] = _mean_and_max(alpha_t)
+
+        if pair_geom is not None:
+            dist = pair_geom[2].detach()
+            w = pair_geom[4].detach()
+            stats["pair_count"] = float(dist.numel())
+            stats["dist_mean"], stats["dist_max"] = _mean_and_max(dist)
+            stats["w_mean"], stats["w_max"] = _mean_and_max(w)
+            stats["w_min"] = float(w.min().item()) if w.numel() > 0 else None
+        else:
+            stats["pair_count"] = 0.0
+            stats["dist_mean"] = None
+            stats["dist_max"] = None
+            stats["w_mean"] = None
+            stats["w_max"] = None
+            stats["w_min"] = None
+
         if rho is not None and rho.numel() > 0 and x is not None:
             rho_det = rho.detach()
             stats["rho_mean"], stats["rho_max"] = _mean_and_max(rho_det)
             stats["rho_std"] = float(rho_det.std().item())
             stats["rho_min"] = float(rho_det.min().item())
 
-            # near/away split by wall distance (threshold = smoothing_length)
             boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
             lower = boundaries[:, 0]
             upper = boundaries[:, 1]
             dist_lower = x - lower
             dist_upper = upper - x
-            min_dist = torch.minimum(dist_lower, dist_upper).amin(dim=-1)  # (N,)
+            min_dist = torch.minimum(dist_lower, dist_upper).amin(dim=-1)
             threshold = float(self._sph.smoothing_length)
             near_mask = (min_dist < threshold).bool()
             away_mask = ~near_mask
@@ -1020,7 +1383,6 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             stats["rho_near_mean"] = None
             stats["rho_away_mean"] = None
 
-        # neighbor edge count (unique undirected pairs)
         if pair_geom is not None and x is not None and x.numel() > 0:
             i_idx, j_idx = pair_geom[0]
             num_nodes = x.shape[0]
@@ -1034,14 +1396,12 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             stats["neighbor_edges_mean"] = None
             stats["neighbor_edges_max"] = None
 
-        # min distance over edges (within cutoff)
         if pair_geom is not None:
             dist = pair_geom[2].detach()
             stats["min_d_edges"] = float(dist.min().item()) if dist.numel() > 0 else None
         else:
             stats["min_d_edges"] = None
 
-        # global minimum distance (per example)
         if x is not None and nparticles_per_example is not None and x.numel() > 0:
             stats["min_d"] = self._compute_min_distance_all(
                 x.detach(), nparticles_per_example.detach()
@@ -1049,7 +1409,6 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         else:
             stats["min_d"] = None
 
-        # |a_pred| stats (total acceleration including wall/gravity)
         if a_total is not None and a_total.numel() > 0:
             a_mag = torch.linalg.norm(a_total.detach(), dim=-1)
             if a_mag.numel() > 0:
@@ -1187,13 +1546,19 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
     ):
         del material_property
 
+        particle_types = particle_types.to(self._device)
+
+        wall_mask = self._wall_particle_mask(
+            particle_types, position_sequence.shape[0], self._device
+        )
+        if wall_mask is not None:
+            position_sequence_noise = position_sequence_noise.clone()
+            position_sequence_noise[wall_mask] = 0.0
+
         # --- Input world (noisy) ---
         noisy_seq = position_sequence + position_sequence_noise
         boundaries = self._boundaries.to(device=self._device, dtype=noisy_seq.dtype)
         lower, upper = boundaries[:, 0], boundaries[:, 1]
-
-        particle_types = particle_types.to(self._device)
-        wall_mask = self._wall_particle_mask(particle_types, noisy_seq.shape[0], self._device)
 
         x_raw = noisy_seq[:, -1].to(self._device)
         prev_raw = noisy_seq[:, -2].to(self._device)
@@ -1252,4 +1617,9 @@ __all__ = [
     "WallConfig",
     "WallMagnitudeNet",
     "WallParticleConfig",
+    "TermConfig",
+    "PressureConfig",
+    "ContactConfig",
+    "PairPressureRepulsionNet",
+    "PairContactAlphaNet",
 ]
