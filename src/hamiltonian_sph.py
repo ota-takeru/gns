@@ -584,10 +584,12 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             vel_stats = normalization_stats.get("velocity", {})
             vel_std = torch.as_tensor(vel_stats.get("std", 0.0), dtype=torch.float32)
             vel_std_max = float(vel_std.abs().max().item()) if vel_std.numel() > 0 else 0.0
+            dt_safe = max(self._dt, 1e-8)
             if vel_std_max > 0:
-                self._vel_scale = vel_std_max
+                # dataset velocity stats are per-step displacements; convert to velocity scale
+                self._vel_scale = float(vel_std_max / dt_safe)
             else:
-                self._vel_scale = float(self._pos_scale / max(self._dt, 1e-8))
+                self._vel_scale = float(self._pos_scale / dt_safe)
 
         # Pair nets
         if self._use_density:
@@ -1654,15 +1656,16 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
     ) -> torch.Tensor:
         del material_property
 
+        dt_safe = max(self._dt, 1e-8)
         x = current_positions[:, -1].to(self._device)
         prev = current_positions[:, -2].to(self._device)
-        v = self._relative_displacement(x, prev) / max(self._dt, 1e-8)
+        v = self._relative_displacement(x, prev) / dt_safe
         # 直近 5 ステップの速度ノルム平均を計算（ダンピング用ゲート）
         with torch.no_grad():
             vel_hist = self._relative_displacement(
                 current_positions[:, 1:], current_positions[:, :-1]
             ).to(self._device)
-            vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1)
+            vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1) / dt_safe
 
         nparticles_per_example = nparticles_per_example.to(self._device)
         particle_types = particle_types.to(self._device)
@@ -1718,11 +1721,12 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         prev = self._clamp_positions(prev_raw, lower, upper, wall_mask)
         next_noisy = self._clamp_positions(next_raw, lower, upper, wall_mask)
 
-        v = self._relative_displacement(x, prev) / max(self._dt, 1e-8)
+        dt_safe = max(self._dt, 1e-8)
+        v = self._relative_displacement(x, prev) / dt_safe
         vel_hist = self._relative_displacement(noisy_seq[:, 1:], noisy_seq[:, :-1]).to(
             self._device
         )
-        vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1)
+        vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1) / dt_safe
 
         nparticles_per_example = nparticles_per_example.to(self._device)
 
