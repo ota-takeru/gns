@@ -1,8 +1,9 @@
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
+import numpy as np 
 
 
 def _compute_differences(sequence: np.ndarray) -> np.ndarray:

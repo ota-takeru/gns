@@ -10,7 +10,8 @@
     "dataset_sources": [
         "takerv/gns-codes",
         "takerv/dam-break-left",
-        "takerv/dam-break-left-wall2"
+        "takerv/dam-break-left-wall2",
+        "takerv/dam-break-left-periodic-zero-g"
     ],
     "competition_sources": [],
     "kernel_sources": []

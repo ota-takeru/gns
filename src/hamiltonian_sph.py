@@ -43,6 +43,9 @@ import torch
 from torch import nn
 from torch_geometric.nn import radius_graph
 
+BOUNDARY_MODE_WALLS = "walls"
+BOUNDARY_MODE_PERIODIC = "periodic"
+
 import graph_network
 from learned_simulator import BaseSimulator
 
@@ -471,6 +474,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         particle_type_embedding_size: int,
         boundaries,
         boundary_clamp_limit: float = 1.0,
+        boundary_mode: str = BOUNDARY_MODE_WALLS,
         device: torch.device | str = "cpu",
         *,
         sph: SPHConfig | None = None,
@@ -514,6 +518,14 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
                 f"Expected boundaries shape ({self._dim},2); got {tuple(boundaries_arr.shape)}"
             )
         self._boundaries = boundaries_arr
+        self._boundary_mode = self._normalize_boundary_mode(boundary_mode)
+        if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+            lengths = boundaries_arr[:, 1] - boundaries_arr[:, 0]
+            if torch.any(lengths <= 0):
+                raise ValueError("Periodic boundaries require bounds with positive length.")
+            self._periodic_length = lengths
+        else:
+            self._periodic_length = None
         self._boundary_restitution = 0.5
         self._rollout_reflect_walls = bool(rollout_reflect_walls)
 
@@ -555,6 +567,9 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         self._wall_particles_cfg = _coerce(
             wall_particles, WallParticleConfig, WallParticleConfig()
         )
+        if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+            self._rollout_reflect_walls = False
+            self._wall_cfg.enabled = False
         self._terms_cfg = _coerce(terms, TermConfig, TermConfig())
         self._pressure_cfg = _coerce(pressure, PressureConfig, PressureConfig())
         self._contact_cfg = _coerce(contact, ContactConfig, ContactConfig())
@@ -668,22 +683,29 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         batch_ids = torch.repeat_interleave(
             torch.arange(len(counts), device=node_position.device), counts
         )
-        backend = "radius_graph"
-        backend_note: str | None = None
-        try:
-            edge_index = radius_graph(
-                node_position,
-                r=radius,
-                batch=batch_ids,
-                loop=add_self_edges,
-                max_num_neighbors=self._sph.max_num_neighbors,
-            )
-        except (ImportError, RuntimeError) as e:
-            backend = "dense_radius_graph"
-            backend_note = f"{type(e).__name__}: {e}"
-            edge_index = self._dense_radius_graph(
+        if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+            backend = "dense_radius_graph_periodic"
+            backend_note = None
+            edge_index = self._dense_radius_graph_periodic(
                 node_position, nparticles_per_example, radius, add_self_edges
             )
+        else:
+            backend = "radius_graph"
+            backend_note = None
+            try:
+                edge_index = radius_graph(
+                    node_position,
+                    r=radius,
+                    batch=batch_ids,
+                    loop=add_self_edges,
+                    max_num_neighbors=self._sph.max_num_neighbors,
+                )
+            except (ImportError, RuntimeError) as e:
+                backend = "dense_radius_graph"
+                backend_note = f"{type(e).__name__}: {e}"
+                edge_index = self._dense_radius_graph(
+                    node_position, nparticles_per_example, radius, add_self_edges
+                )
         self._log_neighbor_backend(
             backend=backend,
             node_position=node_position,
@@ -726,6 +748,41 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             return torch.empty((2, 0), dtype=torch.long, device=device)
         return torch.cat(edges, dim=1)
 
+    def _dense_radius_graph_periodic(
+        self,
+        node_position: torch.Tensor,
+        nparticles_per_example: torch.Tensor,
+        radius: float,
+        add_self_edges: bool,
+    ) -> torch.Tensor:
+        device = node_position.device
+        edges: list[torch.Tensor] = []
+        start_idx = 0
+        eps = 1e-8
+
+        for n in nparticles_per_example.tolist():
+            n = int(n)
+            if n == 0:
+                continue
+            slice_pos = node_position[start_idx : start_idx + n]
+            delta = slice_pos[:, None, :] - slice_pos[None, :, :]
+            delta = self._minimum_image_displacement(delta)
+            dist_mat = torch.linalg.norm(delta, dim=-1)
+            mask = dist_mat <= (radius + eps)
+            if not add_self_edges:
+                idx = torch.arange(n, device=device)
+                mask[idx, idx] = False
+            r_idx, s_idx = torch.nonzero(mask, as_tuple=True)
+            if r_idx.numel() > 0:
+                receivers = r_idx + start_idx
+                senders = s_idx + start_idx
+                edges.append(torch.stack([receivers, senders], dim=0))
+            start_idx += n
+
+        if not edges:
+            return torch.empty((2, 0), dtype=torch.long, device=device)
+        return torch.cat(edges, dim=1)
+
     def _log_neighbor_backend(
         self,
         *,
@@ -751,6 +808,41 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         parts = [f"{k}={v}" for k, v in info.items()]
         print("[neighbor][HamiltonianSPH]", " ".join(parts))
         self._neighbor_debug_logged = True
+
+    def _normalize_boundary_mode(self, mode: str) -> str:
+        value = str(mode).strip().lower()
+        if value not in {BOUNDARY_MODE_WALLS, BOUNDARY_MODE_PERIODIC}:
+            raise ValueError(
+                f"Unsupported boundary_mode '{mode}'. Use '{BOUNDARY_MODE_WALLS}' or '{BOUNDARY_MODE_PERIODIC}'."
+            )
+        return value
+
+    def _wrap_positions(
+        self,
+        x: torch.Tensor,
+        lower: torch.Tensor,
+        upper: torch.Tensor,
+        wall_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        span = upper - lower
+        x_wrap = lower + torch.remainder(x - lower, span)
+        if wall_mask is None:
+            return x_wrap
+        mask = wall_mask[:, None].to(dtype=torch.bool, device=x_wrap.device)
+        return torch.where(mask, x, x_wrap)
+
+    def _minimum_image_displacement(self, delta: torch.Tensor) -> torch.Tensor:
+        if self._boundary_mode != BOUNDARY_MODE_PERIODIC:
+            return delta
+        if self._periodic_length is None:
+            raise RuntimeError("Periodic lengths are not available.")
+        length = self._periodic_length.to(device=delta.device, dtype=delta.dtype)
+        half = 0.5 * length
+        return torch.remainder(delta + half, length) - half
+
+    def _relative_displacement(self, pos_a: torch.Tensor, pos_b: torch.Tensor) -> torch.Tensor:
+        delta = pos_a - pos_b
+        return self._minimum_image_displacement(delta)
 
     def get_neighbor_debug_info(self) -> dict[str, str | bool] | None:
         """Return cached neighbor-search device info (first call only)."""
@@ -802,7 +894,7 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         if pairs is None:
             return None
         i_idx, j_idx = pairs
-        rel = x[j_idx] - x[i_idx]  # (P,dim)
+        rel = self._relative_displacement(x[j_idx], x[i_idx])  # (P,dim)
         dist = torch.sqrt((rel * rel).sum(dim=-1) + 1e-12)  # (P,)
         r_hat = rel / (dist.unsqueeze(-1) + 1e-8)  # (P,dim)
         w = self._cutoff_weight(dist)
@@ -836,6 +928,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
         lower = boundaries[:, 0]
         upper = boundaries[:, 1]
+        if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+            return self._wrap_positions(x, lower, upper, mask_exclude), v
 
         below = x < lower
         above = x > upper
@@ -877,6 +971,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         upper: torch.Tensor,
         wall_mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+            return self._wrap_positions(x, lower, upper, wall_mask)
         x_clamped = torch.min(torch.max(x, lower), upper)
         if wall_mask is None:
             return x_clamped
@@ -886,6 +982,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
     # ------------------------------------------------------------
     # Wall acceleration (no wall particles)
     def _wall_acc(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+            return torch.zeros_like(x)
         if self._wall_mag_net is None:
             return torch.zeros_like(x)
 
@@ -1374,23 +1472,27 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             stats["rho_std"] = float(rho_det.std().item())
             stats["rho_min"] = float(rho_det.min().item())
 
-            boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
-            lower = boundaries[:, 0]
-            upper = boundaries[:, 1]
-            dist_lower = x - lower
-            dist_upper = upper - x
-            min_dist = torch.minimum(dist_lower, dist_upper).amin(dim=-1)
-            threshold = float(self._sph.smoothing_length)
-            near_mask = (min_dist < threshold).bool()
-            away_mask = ~near_mask
+            if self._boundary_mode != BOUNDARY_MODE_PERIODIC:
+                boundaries = self._boundaries.to(device=x.device, dtype=x.dtype)
+                lower = boundaries[:, 0]
+                upper = boundaries[:, 1]
+                dist_lower = x - lower
+                dist_upper = upper - x
+                min_dist = torch.minimum(dist_lower, dist_upper).amin(dim=-1)
+                threshold = float(self._sph.smoothing_length)
+                near_mask = (min_dist < threshold).bool()
+                away_mask = ~near_mask
 
-            def _masked_mean(t: torch.Tensor, mask: torch.Tensor) -> float | None:
-                if not bool(mask.any()):
-                    return None
-                return float(t[mask].mean().item())
+                def _masked_mean(t: torch.Tensor, mask: torch.Tensor) -> float | None:
+                    if not bool(mask.any()):
+                        return None
+                    return float(t[mask].mean().item())
 
-            stats["rho_near_mean"] = _masked_mean(rho_det, near_mask)
-            stats["rho_away_mean"] = _masked_mean(rho_det, away_mask)
+                stats["rho_near_mean"] = _masked_mean(rho_det, near_mask)
+                stats["rho_away_mean"] = _masked_mean(rho_det, away_mask)
+            else:
+                stats["rho_near_mean"] = None
+                stats["rho_away_mean"] = None
         else:
             stats["rho_mean"] = None
             stats["rho_max"] = None
@@ -1497,7 +1599,11 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             )
             v_new = v + dt * vdot
             x_new = x + dt * v_new
-            if self._rollout_reflect_walls:
+            if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+                x_new, v_new = self._apply_boundary_conditions(
+                    x_new, v_new, mask_exclude=wall_mask
+                )
+            elif self._rollout_reflect_walls:
                 x_new, v_new = self._apply_boundary_conditions(
                     x_new, v_new, mask_exclude=wall_mask
                 )
@@ -1524,7 +1630,11 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
             vel_hist_mean=vel_hist_mean,
         )
         v_new = v_half + 0.5 * dt * vdot2
-        if self._rollout_reflect_walls:
+        if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
+            x_new, v_new = self._apply_boundary_conditions(
+                x_new, v_new, mask_exclude=wall_mask
+            )
+        elif self._rollout_reflect_walls:
             x_new, v_new = self._apply_boundary_conditions(
                 x_new, v_new, mask_exclude=wall_mask
             )
@@ -1546,10 +1656,12 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         x = current_positions[:, -1].to(self._device)
         prev = current_positions[:, -2].to(self._device)
-        v = (x - prev) / max(self._dt, 1e-8)
+        v = self._relative_displacement(x, prev) / max(self._dt, 1e-8)
         # 直近 5 ステップの速度ノルム平均を計算（ダンピング用ゲート）
         with torch.no_grad():
-            vel_hist = (current_positions[:, 1:] - current_positions[:, :-1]).to(self._device)
+            vel_hist = self._relative_displacement(
+                current_positions[:, 1:], current_positions[:, :-1]
+            ).to(self._device)
             vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1)
 
         nparticles_per_example = nparticles_per_example.to(self._device)
@@ -1606,8 +1718,10 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
         prev = self._clamp_positions(prev_raw, lower, upper, wall_mask)
         next_noisy = self._clamp_positions(next_raw, lower, upper, wall_mask)
 
-        v = (x - prev) / max(self._dt, 1e-8)
-        vel_hist = (noisy_seq[:, 1:] - noisy_seq[:, :-1]).to(self._device)
+        v = self._relative_displacement(x, prev) / max(self._dt, 1e-8)
+        vel_hist = self._relative_displacement(noisy_seq[:, 1:], noisy_seq[:, :-1]).to(
+            self._device
+        )
         vel_hist_mean = torch.linalg.norm(vel_hist, dim=-1).mean(dim=1)
 
         nparticles_per_example = nparticles_per_example.to(self._device)
@@ -1630,8 +1744,8 @@ class HamiltonianSPHVarAWithDissipation(BaseSimulator):
 
         # --- Target in the SAME noisy world ---
         with torch.no_grad():
-            v_next = next_noisy - x
-            v_prev = x - prev
+            v_next = self._relative_displacement(next_noisy, x)
+            v_prev = self._relative_displacement(x, prev)
             target_acc = v_next - v_prev  # == a*dt^2
             target_normalized = (target_acc - acc_mean) / acc_std
 

@@ -61,6 +61,7 @@ def _get_simulator(
         )
         raise ValueError(msg)
     boundary_clamp_limit = float(metadata.get("boundary_augment", 1.0))
+    boundary_mode = str(metadata.get("boundary_mode", "walls")).strip().lower()
 
     method_name = getattr(cfg, "method", "gns")
     method_options_all = getattr(cfg, "method_options", {}) or {}
@@ -101,6 +102,7 @@ def _get_simulator(
         "particle_type_embedding_size": 16,
         "boundaries": boundaries,
         "boundary_clamp_limit": boundary_clamp_limit,
+        "boundary_mode": boundary_mode,
         "device": device,
     }
 

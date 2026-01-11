@@ -1,7 +1,7 @@
 # Dataset generation configuration
 output_dir: ./datasets/out
-num_train_scenes: 1000
-num_valid_scenes: 100
+num_train_scenes: 100
+num_valid_scenes: 20
 
 # Simulation settings
 timesteps: 240

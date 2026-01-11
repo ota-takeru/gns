@@ -35,6 +35,15 @@ cases:
     seed: 100
     output_subdir: dam_break_left_wall2
     wall_particle_layers: 2
+    boundary_mode: walls
+
+  - name: dam_break_left_periodic_zero_g
+    seed: 150
+    output_subdir: dam_break_left_periodic_zero_g
+    gravity: [0.0, 0.0]
+    boundary_mode: periodic
+    boundary_clamp_limit: 0.0
+    wall_particle_layers: 0
 
   # - name: dam_break_right
   #   seed: 200

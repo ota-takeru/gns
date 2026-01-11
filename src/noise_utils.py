@@ -6,9 +6,15 @@ import learned_simulator
 # position列を受け取ってランダムウォークノイズを生成する。
 # 具体的には、速度に関するランダムウォークノイズを生成し、位置のノイズに変換する。
 def get_random_walk_noise_for_position_sequence(
-    position_sequence: torch.Tensor, noise_std_last_step: float
+    position_sequence: torch.Tensor,
+    noise_std_last_step: float,
+    *,
+    boundaries: torch.Tensor | None = None,
+    boundary_mode: str = learned_simulator.BOUNDARY_MODE_WALLS,
 ) -> torch.Tensor:  # position_sequence: [N, T, D]
-    velocity_sequence = learned_simulator.time_diff(position_sequence)  # 速度列を計算
+    velocity_sequence = learned_simulator.time_diff(
+        position_sequence, boundaries=boundaries, boundary_mode=boundary_mode
+    )  # 速度列を計算
 
     num_velocities = velocity_sequence.shape[1]
     if num_velocities == 0:

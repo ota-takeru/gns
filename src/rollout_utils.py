@@ -218,7 +218,15 @@ def validation(
     labels = example[1].to(device)
 
     noise_sampler = noise_utils.get_noise(cfg.noise)
-    sampled_noise = noise_sampler(position, noise_std_last_step=cfg.noise_std).to(device)
+    core_sim = simulator.module if isinstance(simulator, DDP) else simulator
+    boundary_mode = getattr(core_sim, "_boundary_mode", "walls")
+    boundaries = getattr(core_sim, "_boundaries", None)
+    sampled_noise = noise_sampler(
+        position,
+        noise_std_last_step=cfg.noise_std,
+        boundaries=boundaries,
+        boundary_mode=boundary_mode,
+    ).to(device)
     non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(device)
     sampled_noise *= non_kinematic_mask.view(-1, 1, 1)
 
@@ -252,6 +260,9 @@ def _split_validation_by_wall_distance(
 ) -> tuple[float | None, float | None]:
     """壁との距離で validation 誤差を 2 分割して返す。粒子が存在しない場合は None。"""
     core = simulator.module if isinstance(simulator, DDP) else simulator
+    boundary_mode = getattr(core, "_boundary_mode", "walls")
+    if boundary_mode == "periodic":
+        return None, None
     boundaries = getattr(core, "_boundaries", None)
     smoothing_length = getattr(getattr(core, "_sph", None), "smoothing_length", None)
     if boundaries is None or smoothing_length is None:
