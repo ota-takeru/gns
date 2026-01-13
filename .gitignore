@@ -10,7 +10,7 @@ dist/
 wheels/
 *.egg-info
 out/
-rollouts/   
+rollouts/       
 models_small/
 rollouts_small/
 out_fluid/      

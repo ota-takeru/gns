@@ -370,8 +370,13 @@ class GNSSimulator(BaseSimulator):
         if self._edge_relative_velocity:
             relative_velocities = (
                 most_recent_velocity[senders, :] - most_recent_velocity[receivers, :]
-            )
-            edge_features_list.append(relative_velocities)
+            )  # [E, D]
+            # 法線（接線）分解: r_hat は正規化済み相対変位
+            eps = 1e-8
+            r_hat = normalized_relative_displacements / (normalized_relative_distances + eps)
+            normal_speed = (relative_velocities * r_hat).sum(dim=-1, keepdim=True)  # [E, 1]
+            tangential_vel = relative_velocities - normal_speed * r_hat  # [E, D]
+            edge_features_list.extend([normal_speed, tangential_vel])
         edge_features = torch.cat(edge_features_list, dim=-1)
 
         # ------edge_indexの計算------
