@@ -77,6 +77,7 @@ class GNSSimulator(BaseSimulator):
         boundaries: np.ndarray,
         boundary_clamp_limit: float = 1.0,
         boundary_mode: str = BOUNDARY_MODE_WALLS,
+        edge_relative_velocity: bool = False,
         device: torch.device | str = "cpu",
     ) -> None:
         super().__init__()
@@ -111,6 +112,7 @@ class GNSSimulator(BaseSimulator):
             self._periodic_length = None
             self._boundary_clamp_limit = boundary_clamp_limit
         self._device = device
+        self._edge_relative_velocity = bool(edge_relative_velocity)
         self._neighbor_debug_logged = False
         self._neighbor_debug_info = None
 
@@ -310,6 +312,7 @@ class GNSSimulator(BaseSimulator):
         ) / velocity_stats["std"]
         flat_velocity_sequence = normalized_velocity_sequence.view(nparticles, -1)
         node_features_list.append(flat_velocity_sequence)
+        most_recent_velocity = normalized_velocity_sequence[:, -1]
 
         if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
             boundary_feature_dim = int(self._boundaries.shape[0]) * 2
@@ -363,9 +366,13 @@ class GNSSimulator(BaseSimulator):
             normalized_relative_displacements, dim=-1, keepdim=True
         )  # [E, 1]
 
-        edge_features = torch.cat(
-            [normalized_relative_displacements, normalized_relative_distances], dim=-1
-        )
+        edge_features_list = [normalized_relative_displacements, normalized_relative_distances]
+        if self._edge_relative_velocity:
+            relative_velocities = (
+                most_recent_velocity[senders, :] - most_recent_velocity[receivers, :]
+            )
+            edge_features_list.append(relative_velocities)
+        edge_features = torch.cat(edge_features_list, dim=-1)
 
         # ------edge_indexの計算------
         edge_index = torch.stack([senders, receivers])  # [2, E]
