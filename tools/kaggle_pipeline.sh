@@ -42,6 +42,7 @@ CODE_SRCS=(
   "config_rollout_small.yaml"
   "config_small.yaml"
   "config_local.yaml"
+  "models"
   "pyproject.toml"
   "uv.lock"
 )
