@@ -224,8 +224,22 @@ def _get_simulator(
             method_options.get("cutoff"), allowed_keys={"kind"}, label="cutoff"
         )
         method_options["integrator"] = _sanitize_dict(
-            method_options.get("integrator"), allowed_keys={"dt", "type"}, label="integrator"
+            method_options.get("integrator"),
+            allowed_keys={"dt", "type", "dt_source"},
+            label="integrator",
         )
+
+        dt_source = None
+        integrator_opts = method_options.get("integrator")
+        if isinstance(integrator_opts, dict):
+            dt_source = integrator_opts.pop("dt_source", None)
+        if dt_source is not None:
+            dt_source = str(dt_source).strip().lower()
+            if dt_source not in {"auto", "metadata", "config"}:
+                print(
+                    "[simulator_factory] integrator.dt_source は auto/metadata/config のみ対応です。"
+                )
+                dt_source = None
 
         method_options["sph"] = _maybe(SPHConfig, "sph")
         method_options["conservative"] = _maybe(ConservativeConfig, "conservative")
@@ -268,15 +282,21 @@ def _get_simulator(
             dt_from_meta = float(dt_from_meta)
             integrator_cfg = method_options["integrator"] or IntegratorConfig()
             current_dt = getattr(integrator_cfg, "dt", None)
-            # ユーザが明示指定していない、もしくは大きく乖離している場合は上書きする
-            if current_dt is None or current_dt <= 0:
+            dt_source_mode = dt_source or "auto"
+            if dt_source_mode == "config":
+                pass
+            elif dt_source_mode == "metadata":
                 integrator_cfg.dt = dt_from_meta
-            elif abs(current_dt - dt_from_meta) / max(dt_from_meta, 1e-9) > 0.05:
-                print(
-                    f"[simulator_factory] integrator.dt({current_dt}) を "
-                    f"データセットの dt({dt_from_meta}) に合わせて上書きします。"
-                )
-                integrator_cfg.dt = dt_from_meta
+            else:
+                # ユーザが明示指定していない、もしくは大きく乖離している場合は上書きする
+                if current_dt is None or current_dt <= 0:
+                    integrator_cfg.dt = dt_from_meta
+                elif abs(current_dt - dt_from_meta) / max(dt_from_meta, 1e-9) > 0.05:
+                    print(
+                        f"[simulator_factory] integrator.dt({current_dt}) を "
+                        f"データセットの dt({dt_from_meta}) に合わせて上書きします。"
+                    )
+                    integrator_cfg.dt = dt_from_meta
             method_options["integrator"] = integrator_cfg
 
         # 粒子質量が未指定ならメタデータから自動推定する。

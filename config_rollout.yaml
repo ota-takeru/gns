@@ -65,6 +65,7 @@ method_options:
       kind: cosine
     integrator:
       dt: 0.006
+      dt_source: auto # auto|metadata|config
       type: symplectic_euler # leapfrog|symplectic_euler
     gravity: [0.0, -9.81] # 2D データセットに合わせる
     include_external_acceleration: true

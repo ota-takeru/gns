@@ -54,6 +54,7 @@ method_options:
       kind: cosine
     integrator:
       dt: 0.006
+      dt_source: auto # auto|metadata|config
       type: leapfrog
     gravity: [0.0, -9.81]
     include_external_acceleration: true
