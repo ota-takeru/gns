@@ -46,6 +46,10 @@ CODE_SRCS=(
   "pyproject.toml"
   "uv.lock"
 )
+# 欠けていても実行を続行したいパスをここに列挙（存在しない場合は警告してスキップ）
+OPTIONAL_SRCS=(
+  "models"
+)
 DATASET_VISIBLE_SRCS=(
   "src"
   "models"
@@ -184,8 +188,13 @@ echo "[2/6] コードをデータセット内の ${CODE_DST_SUBDIR}/ に配置�
 find "$DATASET_DIR" -mindepth 1 -maxdepth 1 ! -name 'dataset-metadata.json' -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$CODE_DST"
 missing=()
+sync_srcs=()
 for src in "${CODE_SRCS[@]}"; do
-  if [[ ! -e "${REPO_ROOT}/${src}" ]]; then
+  if [[ -e "${REPO_ROOT}/${src}" ]]; then
+    sync_srcs+=("$src")
+  elif [[ " ${OPTIONAL_SRCS[*]} " == *" ${src} "* ]]; then
+    echo "オプションのパスが見つかりません: ${src} (スキップします)" | tee -a "$LOG2"
+  else
     missing+=("$src")
   fi
 done
@@ -193,10 +202,18 @@ if (( ${#missing[@]} )); then
   echo "存在しないパスがあります: ${missing[*]}" | tee -a "$LOG2"
   exit 1
 fi
-rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a "$LOG2"
+if (( ${#sync_srcs[@]} == 0 )); then
+  echo "同期するコードがありません。CODE_SRCS を確認してください。" | tee -a "$LOG2"
+  exit 1
+fi
+rsync -a --delete "${sync_srcs[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a "$LOG2"
 
 # Kaggle input から直接参照できるように src と models をデータセット直下にも配置
 for src in "${DATASET_VISIBLE_SRCS[@]}"; do
+  if [[ ! -e "${REPO_ROOT}/${src}" ]]; then
+    echo "DATASET_VISIBLE_SRCS のパスが見つからないためスキップします: ${src}" | tee -a "$LOG2"
+    continue
+  fi
   rsync -a "${REPO_ROOT}/${src}" "${DATASET_DIR}/" 2>&1 | tee -a "$LOG2"
 done
 
