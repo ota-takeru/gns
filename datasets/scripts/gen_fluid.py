@@ -1,10 +1,12 @@
 import argparse
+import inspect
 import json
 import math
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import yaml
@@ -21,6 +23,8 @@ except ImportError:  # pragma: no cover
     from datasets.scripts import dataset_utils
 
 KINEMATIC_PARTICLE_ID = 3
+BOUNDARY_MODE_WALLS = "walls"
+BOUNDARY_MODE_PERIODIC = "periodic"
 
 
 @dataclass
@@ -31,25 +35,23 @@ class DomainConfig:
     top: float = 6.0
 
     def as_array(self) -> np.ndarray:
-        return np.array(
-            [[self.left, self.right], [self.bottom, self.top]], dtype=np.float32
-        )
+        return np.array([[self.left, self.right], [self.bottom, self.top]], dtype=np.float32)
 
 
 @dataclass
 class EmitterConfig:
-    origin: Tuple[float, float] = (-4.5, 0.2)
-    size: Tuple[float, float] = (3.0, 3.0)
+    origin: tuple[float, float] = (-4.5, 0.2)
+    size: tuple[float, float] = (3.0, 3.0)
     jitter: float = 0.01
-    initial_velocity: Tuple[float, float] = (0.0, 0.0)
+    initial_velocity: tuple[float, float] = (0.0, 0.0)
     random_velocity_scale: float = 0.5
-    fill_ratio_range: Tuple[float, float] = (0.9, 1.1)
+    fill_ratio_range: tuple[float, float] = (0.9, 1.1)
 
 
 @dataclass
 class FluidCaseConfig:
     name: str
-    output_subdir: Optional[str] = None
+    output_subdir: str | None = None
     num_train_scenes: int = 200
     num_valid_scenes: int = 40
     timesteps: int = 240
@@ -63,7 +65,8 @@ class FluidCaseConfig:
     boundary_damping: float = 0.5
     boundary_clamp_limit: float = 1.0
     wall_particle_layers: int = 0
-    gravity: Tuple[float, float] = field(default_factory=lambda: (0.0, -9.81))
+    gravity: tuple[float, float] = field(default_factory=lambda: (0.0, -9.81))
+    boundary_mode: str = BOUNDARY_MODE_WALLS
     xsph_factor: float = 0.0
     position_noise: float = 0.01
     seed: int = 42
@@ -77,10 +80,10 @@ class FluidCaseConfig:
 @dataclass
 class FluidDatasetConfig:
     output_root: Path
-    cases: List[FluidCaseConfig]
+    cases: list[FluidCaseConfig]
 
 
-def _load_yaml(path: Path) -> Dict[str, Any]:
+def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found at {path}")
     with path.open("r", encoding="utf-8") as fp:
@@ -90,7 +93,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     return data
 
 
-def _merge_dict(default: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_dict(default: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = dict(default)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -108,7 +111,7 @@ def load_config(path: Path) -> FluidDatasetConfig:
         raise ValueError("`cases` must be a list of case configurations.")
 
     output_root = Path(raw.get("output_root", "./datasets/out_fluid")).resolve()
-    cases: List[FluidCaseConfig] = []
+    cases: list[FluidCaseConfig] = []
     for entry in cases_raw:
         if not isinstance(entry, dict):
             raise ValueError("Each case entry must be a mapping.")
@@ -116,9 +119,7 @@ def load_config(path: Path) -> FluidDatasetConfig:
         domain_cfg = DomainConfig(**merged.get("domain", {}))
         emitter_cfg = EmitterConfig(**merged.get("emitter", {}))
         case_kwargs = {
-            key: value
-            for key, value in merged.items()
-            if key not in {"domain", "emitter"}
+            key: value for key, value in merged.items() if key not in {"domain", "emitter"}
         }
         case = FluidCaseConfig(domain=domain_cfg, emitter=emitter_cfg, **case_kwargs)
         cases.append(case)
@@ -132,11 +133,32 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _normalize_boundary_mode(mode: str) -> str:
+    value = str(mode).strip().lower()
+    if value not in {BOUNDARY_MODE_WALLS, BOUNDARY_MODE_PERIODIC}:
+        raise ValueError(
+            f"Unsupported boundary_mode '{mode}'. Use '{BOUNDARY_MODE_WALLS}' or '{BOUNDARY_MODE_PERIODIC}'."
+        )
+    return value
+
+
+def _filter_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        sig = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return kwargs
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return kwargs
+    return {key: val for key, val in kwargs.items() if key in sig.parameters}
+
+
 try:
-    from pysph.base.nnps import LinkedListNNPS
+    from pysph.base.nnps import DomainManager, LinkedListNNPS
     from pysph.base.utils import get_particle_array_wcsph
     from pysph.sph.scheme import WCSPHScheme
 except ImportError:  # pragma: no cover - PySPH must be available at runtime.
+    DomainManager = None  # type: ignore[assignment]
     LinkedListNNPS = None  # type: ignore[assignment]
     get_particle_array_wcsph = None  # type: ignore[assignment]
     WCSPHScheme = None  # type: ignore[assignment]
@@ -160,11 +182,13 @@ class PySPHSimulation:
         self.substeps = max(1, int(cfg.solver_substeps))
         self.dt = cfg.dt
         self.gravity = np.array(cfg.gravity, dtype=np.float32)
-        self.domain_min = np.array(
-            [cfg.domain.left, cfg.domain.bottom], dtype=np.float32
-        )
+        self.boundary_mode = _normalize_boundary_mode(cfg.boundary_mode)
+        self.domain_min = np.array([cfg.domain.left, cfg.domain.bottom], dtype=np.float32)
         self.domain_max = np.array([cfg.domain.right, cfg.domain.top], dtype=np.float32)
-        self.boundary_margin = self.spacing * 0.5
+        self.boundary_margin = (
+            0.0 if self.boundary_mode == BOUNDARY_MODE_PERIODIC else self.spacing * 0.5
+        )
+        self.domain_manager = self._build_domain_manager()
 
         self.positions0, self.velocities0 = self._initialize_particles()
         (
@@ -175,11 +199,11 @@ class PySPHSimulation:
             self.nnps,
         ) = self._setup_solver()
 
-        self.history: List[np.ndarray] = []
+        self.history: list[np.ndarray] = []
         self._substep_counter = 0
         self._target_frames = cfg.timesteps
 
-    def _initialize_particles(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _initialize_particles(self) -> tuple[np.ndarray, np.ndarray]:
         emit = self.cfg.emitter
         ox, oy = emit.origin
         sx, sy = emit.size
@@ -245,18 +269,14 @@ class PySPHSimulation:
         return positions, velocities
 
     def _create_boundary_particles(self, layers: int = 2) -> np.ndarray:
-        xs: List[float] = []
-        ys: List[float] = []
+        xs: list[float] = []
+        ys: list[float] = []
         left, bottom = self.domain_min
         right, top = self.domain_max
         for layer in range(layers):
             offset = layer * self.spacing * 0.5
-            x_vals = np.arange(
-                left - offset, right + offset + self.spacing, self.spacing
-            )
-            y_vals = np.arange(
-                bottom - offset, top + offset + self.spacing, self.spacing
-            )
+            x_vals = np.arange(left - offset, right + offset + self.spacing, self.spacing)
+            y_vals = np.arange(bottom - offset, top + offset + self.spacing, self.spacing)
             xs.extend(x_vals)
             ys.extend(np.full_like(x_vals, bottom - offset))
             xs.extend(x_vals)
@@ -273,17 +293,13 @@ class PySPHSimulation:
 
     def _setup_solver(
         self,
-    ) -> Tuple["ParticleArray", "ParticleArray", WCSPHScheme, "Solver", LinkedListNNPS]:
+    ) -> tuple["ParticleArray", "ParticleArray", WCSPHScheme, "Solver", LinkedListNNPS]:
         # Late imports for typing; guarded by constructor check above.
         from pysph.base.utils import get_particle_array_wcsph
 
-        sound_speed = math.sqrt(
-            max(self.cfg.stiffness, 1e-6) / max(self.cfg.rest_density, 1e-6)
-        )
+        sound_speed = math.sqrt(max(self.cfg.stiffness, 1e-6) / max(self.cfg.rest_density, 1e-6))
         nu = (
-            self.cfg.viscosity / max(self.cfg.rest_density, 1e-6)
-            if self.cfg.viscosity > 0
-            else 0.0
+            self.cfg.viscosity / max(self.cfg.rest_density, 1e-6) if self.cfg.viscosity > 0 else 0.0
         )
 
         fluid = get_particle_array_wcsph(
@@ -291,7 +307,11 @@ class PySPHSimulation:
             x=self.positions0[:, 0],
             y=self.positions0[:, 1],
         )
-        boundary_coords = self._create_boundary_particles(layers=2)
+        boundary_coords = np.empty((0, 2), dtype=np.float32)
+        solids: list[str] = []
+        if self.boundary_mode == BOUNDARY_MODE_WALLS:
+            boundary_coords = self._create_boundary_particles(layers=2)
+            solids = ["boundary"]
         boundary = get_particle_array_wcsph(
             name="boundary",
             x=boundary_coords[:, 0] if len(boundary_coords) else np.empty(0),
@@ -312,7 +332,7 @@ class PySPHSimulation:
 
         scheme = WCSPHScheme(
             fluids=["fluid"],
-            solids=["boundary"],
+            solids=solids,
             dim=2,
             rho0=self.cfg.rest_density,
             c0=sound_speed,
@@ -335,16 +355,75 @@ class PySPHSimulation:
         solver.set_max_steps(int(max(1, math.ceil(tf / sub_dt) * 2)))
         if not hasattr(solver, "pm"):
             solver.pm = None  # PySPH < 1.0b2 safety: ensure attribute exists
+        if self.domain_manager is not None:
+            if hasattr(solver, "set_domain_manager"):
+                solver.set_domain_manager(self.domain_manager)
+            elif hasattr(solver, "domain_manager"):
+                solver.domain_manager = self.domain_manager
 
         particles = [fluid, boundary]
         scheme.setup_properties(particles, clean=True)
         equations = scheme.get_equations()
-        nnps = LinkedListNNPS(dim=2, particles=particles, radius_scale=2.0)
+        nnps_kwargs: dict[str, Any] = {"dim": 2, "particles": particles, "radius_scale": 2.0}
+        if self.domain_manager is not None:
+            # Try different parameter names for domain manager (PySPH version compatibility)
+            try:
+                nnps = LinkedListNNPS(domain_manager=self.domain_manager, **nnps_kwargs)
+            except TypeError:
+                try:
+                    nnps = LinkedListNNPS(domain=self.domain_manager, **nnps_kwargs)
+                except TypeError:
+                    raise RuntimeError(
+                        "LinkedListNNPS does not accept a domain manager; "
+                        "periodic boundaries cannot be enabled."
+                    )
+        else:
+            nnps = LinkedListNNPS(**nnps_kwargs)
         solver.setup(particles, equations, nnps)
         solver.add_post_step_callback(self._on_post_step)
         return fluid, boundary, scheme, solver, nnps
 
+    def _build_domain_manager(self) -> Optional["DomainManager"]:
+        if self.boundary_mode != BOUNDARY_MODE_PERIODIC:
+            return None
+        if DomainManager is None:
+            raise RuntimeError(
+                "Periodic boundary requested but PySPH DomainManager is unavailable."
+            )
+        if np.any(self.domain_max <= self.domain_min):
+            raise ValueError("Invalid domain bounds for periodic boundary.")
+        kwargs = {
+            "xmin": float(self.domain_min[0]),
+            "xmax": float(self.domain_max[0]),
+            "ymin": float(self.domain_min[1]),
+            "ymax": float(self.domain_max[1]),
+            "zmin": 0.0,
+            "zmax": 0.0,
+            "periodic_in_x": True,
+            "periodic_in_y": True,
+            "periodic_in_z": False,
+        }
+        filtered = _filter_kwargs(DomainManager, kwargs)
+        if "periodic_in_x" not in filtered or "periodic_in_y" not in filtered:
+            raise RuntimeError(
+                "PySPH DomainManager does not expose periodic flags; "
+                "cannot enable accurate periodic boundaries."
+            )
+        return DomainManager(**filtered)
+
+    def _wrap_periodic_positions(self) -> None:
+        span = self.domain_max - self.domain_min
+        if np.any(span <= 0):
+            raise ValueError("Invalid domain size for periodic wrapping.")
+        x = self.fluid.x
+        y = self.fluid.y
+        x[:] = self.domain_min[0] + np.mod(x - self.domain_min[0], span[0])
+        y[:] = self.domain_min[1] + np.mod(y - self.domain_min[1], span[1])
+
     def _apply_boundary_constraints(self) -> None:
+        if self.boundary_mode == BOUNDARY_MODE_PERIODIC:
+            self._wrap_periodic_positions()
+            return
         lower = self.domain_min + self.boundary_margin
         upper = self.domain_max - self.boundary_margin
         x = self.fluid.x
@@ -371,9 +450,9 @@ class PySPHSimulation:
             v[above_y] *= -self.cfg.boundary_damping
 
     def _record_frame(self) -> None:
-        positions = np.stack(
-            (np.asarray(self.fluid.x), np.asarray(self.fluid.y)), axis=1
-        ).astype(np.float32, copy=False)
+        positions = np.stack((np.asarray(self.fluid.x), np.asarray(self.fluid.y)), axis=1).astype(
+            np.float32, copy=False
+        )
         self.history.append(positions.copy())
 
     def _on_post_step(self, solver: "Solver") -> None:
@@ -411,19 +490,17 @@ class PySPHSimulation:
 
 def generate_scene(
     cfg: FluidCaseConfig, seed: int
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     rng = random.Random(seed)
     sim = PySPHSimulation(cfg, rng)
     positions = sim.rollout(cfg.timesteps)
     dynamic_count = positions.shape[1]
 
     wall_coords = np.empty((0, 2), dtype=np.float32)
-    if cfg.wall_particle_layers > 0:
+    if cfg.boundary_mode != BOUNDARY_MODE_PERIODIC and cfg.wall_particle_layers > 0:
         wall_coords = sim._create_boundary_particles(layers=cfg.wall_particle_layers)
         if len(wall_coords):
-            wall_positions = np.repeat(
-                wall_coords[None, :, :], positions.shape[0], axis=0
-            )
+            wall_positions = np.repeat(wall_coords[None, :, :], positions.shape[0], axis=0)
             positions = np.concatenate([positions, wall_positions], axis=1)
 
     n_wall = int(wall_coords.shape[0])
@@ -446,6 +523,7 @@ def generate_scene(
         "boundary_augment": cfg.boundary_clamp_limit,
         "wall_particles": int(n_wall),
         "wall_particle_layers": int(cfg.wall_particle_layers),
+        "boundary_mode": cfg.boundary_mode,
         "note": "synthetic 2D SPH fluid scene",
         "simulator": "pysph_wcsph",
         "sph_backend": "PySPH",
@@ -458,7 +536,7 @@ def save_scene_npz(
     scene_idx: int,
     positions: np.ndarray,
     particle_types: np.ndarray,
-    meta: Dict[str, Any],
+    meta: dict[str, Any],
     split: str,
 ) -> Path:
     split_dir = out_dir / split
@@ -483,9 +561,9 @@ def _generate_split(
     if num_scenes <= 0:
         return
     print(f"\n[{cfg.name}] Generating {num_scenes} {split} scenes...")
-    trajectories: List[np.ndarray] = []
-    particle_types_list: List[np.ndarray] = []
-    last_meta: Optional[Dict[str, Any]] = None
+    trajectories: list[np.ndarray] = []
+    particle_types_list: list[np.ndarray] = []
+    last_meta: dict[str, Any] | None = None
     for idx in range(num_scenes):
         scene_seed = cfg.seed + seed_offset + idx
         positions, particle_types, meta = generate_scene(cfg, scene_seed)
@@ -507,6 +585,7 @@ def _generate_split(
                 "gravity",
                 "wall_particles",
                 "wall_particle_layers",
+                "boundary_mode",
             )
             if key in last_meta
         }
@@ -523,12 +602,27 @@ def _generate_split(
             print(f"[{cfg.name}] Wrote metadata to {meta_path}")
 
 
-def run_generation(config_path: Path, output_root: Optional[Path] = None) -> None:
+def run_generation(
+    config_path: Path,
+    output_root: Path | None = None,
+    target_cases: list[str] | None = None,
+) -> None:
     dataset_cfg = load_config(config_path)
     if output_root is not None:
         dataset_cfg.output_root = output_root.resolve()
 
-    for case_cfg in dataset_cfg.cases:
+    cases_to_generate = dataset_cfg.cases
+    if target_cases:
+        available_names = {c.name for c in dataset_cfg.cases}
+        invalid = [name for name in target_cases if name not in available_names]
+        if invalid:
+            raise ValueError(
+                f"Invalid case name(s): {invalid}. Available cases: {sorted(available_names)}"
+            )
+        cases_to_generate = [c for c in dataset_cfg.cases if c.name in target_cases]
+        print(f"\n=== Generating {len(cases_to_generate)} case(s): {target_cases} ===")
+
+    for case_cfg in cases_to_generate:
         case_dir = case_cfg.resolve_output_dir(dataset_cfg.output_root)
         _ensure_dir(case_dir)
         print(f"\n=== Generating case '{case_cfg.name}' at {case_dir} ===")
@@ -570,12 +664,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override output root directory defined in the config.",
     )
+    parser.add_argument(
+        "--cases",
+        nargs="*",
+        default=None,
+        help="Specify case name(s) to generate. If omitted, all cases in config are generated.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    run_generation(args.config, args.output_root)
+    run_generation(args.config, args.output_root, args.cases)
 
 
 if __name__ == "__main__":

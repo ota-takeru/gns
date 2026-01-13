@@ -5,12 +5,12 @@ __pycache__/
 *[output]/
 .pysph
 build/
+*[output]*/
 dist/
 wheels/
 *.egg-info
 out/
 rollouts/   
-models/
 models_small/
 rollouts_small/
 out_fluid/      

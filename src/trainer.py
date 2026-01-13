@@ -135,6 +135,8 @@ def train(cfg: Config, device: torch.device):
 
     simulator_core = _get_simulator(metadata, cfg.noise_std, cfg.noise_std, device, cfg)
     simulator_core.to(device)
+    boundary_mode = getattr(simulator_core, "_boundary_mode", "walls")
+    boundaries = getattr(simulator_core, "_boundaries", None)
     data_dt = metadata.get("dt")
     model_dt = getattr(simulator_core, "_dt", None)
     if is_main_process:
@@ -704,9 +706,12 @@ def train(cfg: Config, device: torch.device):
                     raise NotImplementedError
                 labels = labels.to(device, non_blocking=True)
 
-                sampled_noise = noise_sampler(position, noise_std_last_step=cfg.noise_std).to(
-                    device, non_blocking=True
-                )
+                sampled_noise = noise_sampler(
+                    position,
+                    noise_std_last_step=cfg.noise_std,
+                    boundaries=boundaries,
+                    boundary_mode=boundary_mode,
+                ).to(device, non_blocking=True)
                 non_kinematic_mask = (particle_type != KINEMATIC_PARTICLE_ID).to(
                     device, non_blocking=True
                 )
