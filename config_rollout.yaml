@@ -6,17 +6,19 @@ scenario: fluid
 scenario_options:
   rigid:
     dataset: ./datasets/out
+    description: Default planar rigid-body scenes
   fluid:
     dataset: ./datasets/out_fluid/dam_break_left_wall2
     rollout_dataset: valid
+    description: PySPH-based dam break fluid dataset
 method: hamiltonian_sph
 method_options:
   hamiltonian_sph:
     particle_mass: null # 未指定ならメタデータから自動推定
     sph:
-      # 学習設定と揃えて近傍数を ~20 に増やす
+      # 粒子間隔0.12・rc≈0.32（=2*h）の想定で近傍数を ~20 に増やす
       smoothing_length: 0.16 # 2*h がカットオフ半径（約0.32）
-      max_num_neighbors: 64
+      max_num_neighbors: 128
     conservative:
       mlp_layers: 2
       mlp_hidden_dim: 128
@@ -65,8 +67,7 @@ method_options:
       kind: cosine
     integrator:
       dt: 0.006
-      dt_source: auto # auto|metadata|config
-      type: symplectic_euler # leapfrog|symplectic_euler
+      type: leapfrog # leapfrog|symplectic_euler
     gravity: [0.0, -9.81] # 2D データセットに合わせる
     include_external_acceleration: true
     pos_feature_scale: null # null で半径を使用
@@ -76,11 +77,11 @@ model_path: ./models/ # 学習済みモデルの格納先
 output_path: ./rollouts/ # 推論結果(pklなど)の出力先
 output_filename: rollout # 出力ファイル名の接頭辞
 
-# 使用するモデル（latest で最新モデル）
-model_file: latest
+# 使用するモデル（null で latest を使用）
+model_file: null
 
 # 推論（rollout）時の制御
-rollout_inference_max_examples: 2 # 生成するシーン（pkl）数の上限。null で全件
+rollout_inference_max_examples: 1 # 生成するシーン（pkl）数の上限。null で全件
 noise_std: 0.0003 # 正規化統計用のノイズ設定（推論で参照）
 noise: random_walk
 loss: acceleration
