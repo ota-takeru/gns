@@ -11,7 +11,8 @@
     "takerv/gns-codes",
     "takerv/dam-break-left",
     "takerv/dam-break-left-wall2",
-    "takerv/dam-break-left-periodic-zero-g"
+    "takerv/dam-break-left-periodic-zero-g",
+    "takerv/gns-40k-100-20"
   ],
   "competition_sources": [],
   "kernel_sources": []
