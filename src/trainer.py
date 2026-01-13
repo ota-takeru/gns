@@ -68,6 +68,7 @@ def train(cfg: Config, device: torch.device):
     is_main_process = cfg.rank == 0
 
     log_fp = None
+
     def _log(msg: str) -> None:
         if is_main_process:
             print(msg)
@@ -129,6 +130,34 @@ def train(cfg: Config, device: torch.device):
         except Exception as exc:
             print(f"[log] failed to open log file {log_path}: {exc}")
             log_fp = None
+
+    if is_main_process:
+        # 実行環境サマリ（GPU・PyTorch・分散設定）
+        if device.type == "cuda":
+            try:
+                prop = torch.cuda.get_device_properties(device)
+                capability = f"{prop.major}.{prop.minor}"
+                total_mem_gb = prop.total_memory / (1024**3)
+                _log(
+                    f"[gpu] name={prop.name} capability={capability} "
+                    f"mem={total_mem_gb:.1f}GB multi_proc={prop.multi_processor_count}"
+                )
+            except Exception as exc:
+                _log(f"[gpu] 情報取得に失敗: {exc}")
+        else:
+            _log("[gpu] CUDA が利用不可のため CPU 実行")
+
+        torch_cuda_ver = getattr(torch.version, "cuda", None)
+        cudnn_ver = torch.backends.cudnn.version()
+        _log(
+            "[env] torch="
+            f"{torch.__version__} cuda={torch_cuda_ver} cudnn={cudnn_ver}"
+        )
+        dist_backend = dist.get_backend() if dist.is_initialized() else "none"
+        _log(
+            f"[dist] world_size={cfg.world_size} rank={cfg.rank} "
+            f"local_rank={cfg.local_rank} backend={dist_backend}"
+        )
 
     metadata_key = cfg.active_scenario.metadata_split if cfg.active_scenario else "train"
     metadata = reading_utils.read_metadata(cfg.data_path, metadata_key)
@@ -211,6 +240,21 @@ def train(cfg: Config, device: torch.device):
 
     amp_enabled = bool(cfg.amp_enable and device.type == "cuda")
     amp_dtype = _resolve_amp_dtype(cfg.amp_dtype) if amp_enabled else torch.float32
+    if is_main_process:
+        effective_batch = cfg.batch_size * accum_steps * max(1, cfg.world_size)
+        _log(
+            f"[train] batch={cfg.batch_size} accum={accum_steps} "
+            f"world_size={cfg.world_size} effective_batch={effective_batch}"
+        )
+        _log(
+            f"[train] amp={amp_enabled} dtype={amp_dtype} "
+            f"max_grad_norm={cfg.max_grad_norm}"
+        )
+        _log(
+            "[loader] workers="
+            f"{cfg.num_workers} persistent={cfg.persistent_workers} "
+            f"pin_memory={cfg.pin_memory} prefetch={cfg.prefetch_factor}"
+        )
     # device_type 引数付きの GradScaler は一部バージョンで初回 step で
     # "No inf checks were recorded" を誤検知することがあるため、従来 API に統一する。
     scaler = GradScaler(enabled=amp_enabled)
@@ -291,6 +335,12 @@ def train(cfg: Config, device: torch.device):
     if cfg.prefetch_factor is not None and cfg.num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
     dl = torch.utils.data.DataLoader(train_dataset, **train_loader_kwargs)
+    if is_main_process:
+        _log(
+            f"[data] train_samples={len(train_dataset)} "
+            f"drop_last={'yes' if drop_last else 'no'} "
+            f"input_seq_len={INPUT_SEQUENCE_LENGTH}"
+        )
 
     train_start_time = time.perf_counter()
     ema_step_time: float | None = None
@@ -322,6 +372,7 @@ def train(cfg: Config, device: torch.device):
             valid_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
         dl_valid = torch.utils.data.DataLoader(valid_dataset, **valid_loader_kwargs)
         dl_valid_iter = iter(dl_valid)
+        _log(f"[data] valid_samples={len(valid_dataset)}")
 
     def _next_valid_example():
         nonlocal dl_valid_iter
@@ -524,6 +575,12 @@ def train(cfg: Config, device: torch.device):
                 f"loss={train_loss:.6f}",
                 f"lr={current_lr:.6e}",
             ]
+            if ema_step_time is not None and ema_step_time > 0:
+                log_parts.append(f"t/step={ema_step_time*1000:.0f}ms")
+                samples_per_sec = (
+                    cfg.batch_size * accum_steps * max(1, cfg.world_size)
+                ) / ema_step_time
+                log_parts.append(f"samples/s={samples_per_sec:.1f}")
             gpu_log = _get_gpu_stats()
             if gpu_log is not None and gpu_mem_total_mb is not None:
                 gpu_util, gpu_mem_used = gpu_log
@@ -598,14 +655,20 @@ def train(cfg: Config, device: torch.device):
             log_parts.append(f"eta={eta_str}")
             _log(" ".join(log_parts))
 
-        if is_main_process and tb_writer is not None and step % tensorboard_interval == 0:
-            tb_writer.add_scalar("train/loss", train_loss, step)
-            tb_writer.add_scalar("train/lr", current_lr, step)
-            gpu_tb = _get_gpu_stats()
-            if gpu_tb is not None:
-                util, mem_used = gpu_tb
-                tb_writer.add_scalar("system/gpu_util", float(util), step)
-                tb_writer.add_scalar("system/gpu_mem_used_mb", float(mem_used), step)
+            if is_main_process and tb_writer is not None and step % tensorboard_interval == 0:
+                tb_writer.add_scalar("train/loss", train_loss, step)
+                tb_writer.add_scalar("train/lr", current_lr, step)
+                if ema_step_time is not None:
+                    tb_writer.add_scalar("system/step_time_sec", float(ema_step_time), step)
+                    samples_per_sec = (
+                        cfg.batch_size * accum_steps * max(1, cfg.world_size)
+                    ) / max(ema_step_time, 1e-12)
+                    tb_writer.add_scalar("system/samples_per_sec", float(samples_per_sec), step)
+                gpu_tb = _get_gpu_stats()
+                if gpu_tb is not None:
+                    util, mem_used = gpu_tb
+                    tb_writer.add_scalar("system/gpu_util", float(util), step)
+                    tb_writer.add_scalar("system/gpu_mem_used_mb", float(mem_used), step)
                 if gpu_mem_total_mb is not None:
                     tb_writer.add_scalar("system/gpu_mem_total_mb", float(gpu_mem_total_mb), step)
             if last_grad_norm_pre_clip is not None:

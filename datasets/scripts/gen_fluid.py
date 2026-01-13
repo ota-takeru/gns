@@ -49,6 +49,24 @@ class EmitterConfig:
 
 
 @dataclass
+class ObstacleConfig:
+    center: tuple[float, float]
+    size: tuple[float, float]
+    padding: float = 0.0
+    damping: Optional[float] = None
+    layers: Optional[int] = None  # YAML 互換用（粒子障害物用レイヤー、ここでは未使用）
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        cx, cy = self.center
+        sx, sy = self.size
+        if sx <= 0 or sy <= 0:
+            raise ValueError("Obstacle size must be positive in both axes.")
+        half_w = sx * 0.5
+        half_h = sy * 0.5
+        return (cx - half_w, cx + half_w, cy - half_h, cy + half_h)
+
+
+@dataclass
 class FluidCaseConfig:
     name: str
     output_subdir: str | None = None
@@ -72,6 +90,7 @@ class FluidCaseConfig:
     seed: int = 42
     domain: DomainConfig = field(default_factory=DomainConfig)
     emitter: EmitterConfig = field(default_factory=EmitterConfig)
+    obstacles: list[ObstacleConfig] = field(default_factory=list)
 
     def resolve_output_dir(self, root: Path) -> Path:
         return root / (self.output_subdir or self.name)
@@ -118,10 +137,28 @@ def load_config(path: Path) -> FluidDatasetConfig:
         merged = _merge_dict(defaults, entry)
         domain_cfg = DomainConfig(**merged.get("domain", {}))
         emitter_cfg = EmitterConfig(**merged.get("emitter", {}))
+        obstacles_cfg: list[ObstacleConfig] = []
+        raw_obstacles = merged.get("obstacles", [])
+        if isinstance(raw_obstacles, dict):
+            raise ValueError("`obstacles` must be a list of obstacle configurations.")
+        if raw_obstacles:
+            if not isinstance(raw_obstacles, Iterable):
+                raise ValueError("`obstacles` must be iterable when provided.")
+            for idx, obs in enumerate(raw_obstacles):
+                if not isinstance(obs, dict):
+                    raise ValueError(f"Obstacle #{idx} must be a mapping.")
+                try:
+                    obstacles_cfg.append(ObstacleConfig(**obs))
+                except TypeError as exc:  # pragma: no cover - defensive
+                    raise ValueError(f"Invalid obstacle #{idx}: {exc}") from exc
+                # Validate size positivity early
+                obstacles_cfg[-1].bounds()
         case_kwargs = {
             key: value for key, value in merged.items() if key not in {"domain", "emitter"}
         }
-        case = FluidCaseConfig(domain=domain_cfg, emitter=emitter_cfg, **case_kwargs)
+        case = FluidCaseConfig(
+            domain=domain_cfg, emitter=emitter_cfg, obstacles=obstacles_cfg, **case_kwargs
+        )
         cases.append(case)
 
     if not cases:
@@ -188,6 +225,12 @@ class PySPHSimulation:
         self.boundary_margin = (
             0.0 if self.boundary_mode == BOUNDARY_MODE_PERIODIC else self.spacing * 0.5
         )
+        self.obstacles = cfg.obstacles
+        (
+            self._obs_bounds,
+            self._obs_margins,
+            self._obs_damping,
+        ) = self._prepare_obstacles()
         self.domain_manager = self._build_domain_manager()
 
         self.positions0, self.velocities0 = self._initialize_particles()
@@ -202,6 +245,29 @@ class PySPHSimulation:
         self.history: list[np.ndarray] = []
         self._substep_counter = 0
         self._target_frames = cfg.timesteps
+
+    def _prepare_obstacles(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Precompute obstacle bounds, margins, and damping for fast collision handling."""
+        if not self.obstacles:
+            return (
+                np.empty((0, 4), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+            )
+        bounds_list: list[tuple[float, float, float, float]] = []
+        margins: list[float] = []
+        damping: list[float] = []
+        for obs in self.obstacles:
+            xmin, xmax, ymin, ymax = obs.bounds()
+            bounds_list.append((xmin, xmax, ymin, ymax))
+            # padding は衝突後の押し出し距離に加算して数値振動を抑える
+            margins.append(max(0.0, obs.padding) + self.spacing * 0.5)
+            damping.append(self.cfg.boundary_damping if obs.damping is None else obs.damping)
+        return (
+            np.asarray(bounds_list, dtype=np.float32),
+            np.asarray(margins, dtype=np.float32),
+            np.asarray(damping, dtype=np.float32),
+        )
 
     def _initialize_particles(self) -> tuple[np.ndarray, np.ndarray]:
         emit = self.cfg.emitter
@@ -266,6 +332,8 @@ class PySPHSimulation:
                 * emit.random_velocity_scale
             )
             velocities += random_vel
+        if self._obs_bounds.size:
+            positions, velocities = self._resolve_obstacles_numpy(positions, velocities)
         return positions, velocities
 
     def _create_boundary_particles(self, layers: int = 2) -> np.ndarray:

@@ -486,7 +486,38 @@ class GNSSimulator(BaseSimulator):
         torch.save(self.state_dict(), path)
 
     def load(self, path: str):
-        self.load_state_dict(torch.load(path, map_location=torch.device("cpu")))
+        state_dict = torch.load(path, map_location=torch.device("cpu"))
+
+        # 互換性: edge_relative_velocity 導入前に学習したチェックポイントは
+        # エッジ入力次元が 3 のまま。現在のモデルが 6 次元を期待する場合は、
+        # 既存重みをコピーし、新規チャネルを 0 でパディングして読み込む。
+        weight_key = "_encode_process_decode.encoder.edge_fn.0.NN-0.weight"
+        if weight_key in state_dict:
+            current_weight = self._encode_process_decode.encoder.edge_fn[0][0].weight
+            target_in = current_weight.shape[1]
+            loaded_weight = state_dict[weight_key]
+            loaded_in = loaded_weight.shape[1]
+            if loaded_in != target_in:
+                if loaded_in < target_in and self._edge_relative_velocity:
+                    pad_cols = target_in - loaded_in
+                    pad = torch.zeros(
+                        loaded_weight.shape[0],
+                        pad_cols,
+                        device=loaded_weight.device,
+                        dtype=loaded_weight.dtype,
+                    )
+                    state_dict[weight_key] = torch.cat([loaded_weight, pad], dim=1)
+                    print(
+                        "[learned_simulator] 旧チェックポイントを edge_relative_velocity "
+                        "対応に合わせるため、edge MLP 入力重みをパディングしました。"
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Edge MLP 入力次元が一致しません (checkpoint {loaded_in} != model {target_in}). "
+                        "モデル再学習か設定の見直しが必要です。"
+                    )
+
+        self.load_state_dict(state_dict)
 
     def _normalize_boundary_mode(self, mode: str) -> str:
         value = str(mode).strip().lower()

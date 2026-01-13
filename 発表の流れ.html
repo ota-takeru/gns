@@ -24,47 +24,45 @@
     
       <div class="crossnote markdown-preview  ">
       
+<h2 id="ニューラルネットワークとは">ニューラルネットワークとは </h2>
+<p>入力に対して期待される出力を返すように関数の形を学習する仕組み。<br>
+[mlp の図を入れる]<br>
+特徴量、潜在ベクトルなどの説明も入れる</p>
 <h2 id="gnsgraph-network-based-simulatorsとは">gns(graph network based simulators)とは </h2>
-<p>水や砂、布などの異なる種類の物質が同時に存在する空間でそれらのふるまいをシミュレーションする方法。<br>
-この手法では物質を細かく区切って、区切られた点である粒子の集まりで成り立っていると捉える。<br>
-近くにある粒子同士が押したり引いたりすることで物質の動きが決まると仮定する。</p>
-<p>この粒子の動きを予測することで、物質全体のふるまいをシミュレーションする。<br>
-この予測にはニューラルネットワークを用いる。<br>
-ニューラルネットワークでは学習と推論の 2 段階がある。<br>
-学習で与えられた入力に対して期待される出力を返すように関数の形を学習する。<br>
-推論では学習した関数を用いて未知の入力に対して出力を返す。</p>
+<p>水や砂、布などの異なる種類の物質が同時に存在する空間において物質を粒子の集まりとしてとらえ、粒子同士の相互作用をニューラルネットワークで学習することで物質の動きを予測する手法。</p>
 <h3 id="具体的なモデル構造">具体的なモデル構造 </h3>
 <p>[図を入れる]</p>
 <p>各時間ステップに対して以下の処理を行う。<br>
 <strong>encoder</strong><br>
 各ノードに対して、近傍のノード間にエッジを張る。<br>
-ノードとエッジの特徴量(位置、速度、相対位置など)を MLP と呼ばれる小さなニューラルネットワークで潜在ベクトルに変換する。<br>
+ノードとエッジの特徴量(速度、相対位置、物質の種類など)を MLP で潜在ベクトルに変換する。<br>
 この変換によって同じ形になるので扱いやすくなる。<!-- 説明不足 --><br>
 <strong>processor</strong></p>
 <ul>
 <li>各エッジを自身のエッジと、接続しているノードを入力として mlp で更新する。<br>
-これにより粒子同士がどのような関係性なのかが反映される。</li>
+エッジに粒子同士がどのような関係性なのかが反映される。</li>
 <li>次に、各ノードを自身のノードと、接続している更新されたエッジを入力として mlp で更新する。<br>
-これによりその関係性をもとにノードの情報が更新される。</li>
+エッジの関係性をもとにノードの情報が更新される。</li>
 </ul>
-<p>この操作は複数回繰り返される。それによりより遠くの粒子の情報も取り込むことができる。<br>
+<p>この操作を複数回繰り返すことでより遠くの粒子の情報も取り込むことができる。<br>
 <strong>decoder</strong><br>
 MLP を使って各ノードのベクトルを加速度に変換する.<br>
 <strong>学習</strong><br>
 出力された加速度と正解の加速度の差が小さくなるよう学習する。</p>
 <p><strong>推論</strong><br>
-学習したモデルを用いて、現在の粒子の位置と速度から次の時間ステップの粒子の加速度を出力する。<br>
-その加速度から次の時間ステップの位置と速度を計算する。</p>
-<h3 id="gns-の良い点">gns の良い点 </h3>
-<p>ノードの特徴量に物質を区別するための簡単なラベルを追加するだけで、異なる物質を同時に扱うことができる。<br>
-従来のニューラルネットワークベースのものに比べて精度と汎化が良い。</p>
+学習したモデルを用いて、出力した加速度から次の時間ステップの位置と速度を計算する。</p>
 <h3 id="gns-の課題">gns の課題 </h3>
-<p>1 ステップの予測を繰り返して長い時間予測(ロールアウト）すると、誤差が含まれる出力が次の入力になるので誤差が蓄積していく。<br>
-特に粒子数を増やしていくと推論時間が従来の手法よりも長くなりやすい。</p>
-<p>gns の課題であるロールアウトによる誤差の蓄積を解決するために新しい手法を考える。<br>
-今回は対象を絞るために流体を扱う。</p>
-<h2 id="sph-法">SPH 法 </h2>
-<p>教師データの作成には gns と同じように、流体を粒子の集合として扱う sph 法を採用する。</p>
+<p>従来のニューラルネットワークベースのものに比べて精度と汎化が良い一方で、長い時間予測(ロールアウト）すると、誤差が含まれた出力が次の入力になるので誤差が蓄積していく。</p>
+<p>gns の課題であるロールアウトによる誤差の蓄積を解決するために新しい手法を考える。</p>
+<h2 id="仮説">仮説 </h2>
+<p>今回の gns の出力では加速度を直接予測している。<br>
+一方で実際の物理現象では力は保存力と散逸に分けられる。<br>
+保存力は位置や密度に依存し、エネルギー保存則に従う。<br>
+散逸は速度に依存し、エネルギーを減少させる方向に働く。<br>
+保存力と散逸を別々に学習することで、物理的な制約を加え、長期のロールアウトによる誤差の蓄積を抑えることができると考える。</p>
+<h2 id="対象とする物質">対象とする物質 </h2>
+<p>今回は対象を絞るために水を想定した流体のみを扱う。<br>
+教師データの作成には gns と同じように、流体を粒子の集合として扱う sph 法を採用する。</p>
 <h3 id="具体的な手法">具体的な手法 </h3>
 <p>流体力学において以下の基礎方程式について解く必要がある。<br>
 [式を書く]<br>
@@ -78,18 +76,8 @@ MLP を使って各ノードのベクトルを加速度に変換する.<br>
 運動方程式の定義<br>
 圧力の定義</p>
 <p>これは流体力学の基礎方程式に対して、カーネル近似と積分の離散化を行った形と一致している。</p>
-<p>流体の力は大きく保存力と散逸に分けられる。<br>
-保存力は圧力や重力など位置や密度に依存し、ポテンシャルエネルギーの勾配で表される。<br>
-<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>=</mo><mo>−</mo><msub><mi mathvariant="normal">∇</mi><mi>x</mi></msub><mi>U</mi><mo stretchy="false">(</mo><mi>x</mi><mo stretchy="false">)</mo><mi mathvariant="normal">/</mi><mi>m</mi></mrow><annotation encoding="application/x-tex">a = - \nabla_x U(x) / m</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal">a</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord">−</span><span class="mord"><span class="mord">∇</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">x</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mord mathnormal" style="margin-right:0.10903em;">U</span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mclose">)</span><span class="mord">/</span><span class="mord mathnormal">m</span></span></span></span></p>
-<ul>
-<li><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>U</mi></mrow><annotation encoding="application/x-tex">U</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathnormal" style="margin-right:0.10903em;">U</span></span></span></span> ポテンシャルエネルギー</li>
-</ul>
-<p>散逸は粘性や摩擦などによるもので速度に依存し、運動エネルギーを減らしていく方向に働く。</p>
-<p>gns は加速度を直接予測するため、保存力と散逸の両方を同時に学習しなければならない。<br>
-保存力と散逸は物理的に異なる性質を持つため別々に学習することで、長期ロールアウトによる誤差の蓄積を抑える手法を次で提案する。</p>
+<p>流体でも保存力と散逸があることを説明する。</p>
 <h2 id="提案する手法">提案する手法 </h2>
-<p>gns による出力を加速度ではなく、保存力と散逸を計算する形にする。</p>
-<h3 id="具体的な手法-1">具体的な手法 </h3>
 <p>gns と同じ構造を用いてポテンシャルエネルギーと、散逸による加速度を別々に出力する。<br>
 水を想定して弱圧縮流体を扱う。</p>
 <p><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi>U</mi><mo stretchy="false">(</mo><mi>X</mi><mo stretchy="false">)</mo><mo>=</mo><munder><mo>∑</mo><mrow><mi>i</mi><mo separator="true">,</mo><mi>j</mi></mrow></munder><msub><mi>f</mi><mi>θ</mi></msub><mo stretchy="false">(</mo><msub><mi>x</mi><mi>i</mi></msub><mo separator="true">,</mo><msub><mi>x</mi><mi>j</mi></msub><mo stretchy="false">)</mo><mo>+</mo><mi>g</mi></mrow><annotation encoding="application/x-tex">U(X) = \sum_{i,j} f_{\theta} (x_i, x_j) + g</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord mathnormal" style="margin-right:0.10903em;">U</span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right:0.07847em;">X</span><span class="mclose">)</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:2.4638em;vertical-align:-1.4138em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:1.05em;"><span style="top:-1.8723em;margin-left:0em;"><span class="pstrut" style="height:3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mpunct mtight">,</span><span class="mord mathnormal mtight" style="margin-right:0.05724em;">j</span></span></span></span><span style="top:-3.05em;"><span class="pstrut" style="height:3.05em;"></span><span><span class="mop op-symbol large-op">∑</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:1.4138em;"><span></span></span></span></span></span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.10764em;">f</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3361em;"><span style="top:-2.55em;margin-left:-0.1076em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right:0.02778em;">θ</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord"><span class="mord mathnormal">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right:0.05724em;">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.2861em;"><span></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:0.625em;vertical-align:-0.1944em;"></span><span class="mord mathnormal" style="margin-right:0.03588em;">g</span></span></span></span></span></p>

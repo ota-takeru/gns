@@ -10,6 +10,9 @@ import numpy as np
 
 from gen_pymunk import DatasetConfig, load_dataset_config
 
+# Embed制限(デフォルト20MB)に引っ掛かると後半フレームが落ちるため拡大
+matplotlib.rcParams["animation.embed_limit"] = 200  # MB
+
 
 def _compute_marker_size(spacing: float | None, scale: float = 1.0) -> float:
     """Convert particle spacing in data units to scatter size (points^2)."""
