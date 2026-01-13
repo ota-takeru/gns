@@ -1,3 +1,5 @@
+import inspect
+
 import numpy as np
 import torch
 
@@ -15,6 +17,34 @@ from hamiltonian_sph import (
 )
 from learned_simulator import BaseSimulator, get_simulator_class
 from train_config import Config, NUM_PARTICLE_TYPES
+
+
+def _filter_kwargs_for_class(cls, kwargs: dict, label: str) -> dict:
+    """クラスの __init__ が受け付けないキーワードを落とし、警告を出す。"""
+    if not kwargs:
+        return {}
+    sig = inspect.signature(cls.__init__)
+    # **kwargs があればそのまま渡す
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return kwargs
+
+    allowed = {
+        name
+        for name, p in sig.parameters.items()
+        if name != "self"
+        and p.kind
+        in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+    filtered = {k: v for k, v in kwargs.items() if k in allowed}
+    dropped = [k for k in kwargs if k not in filtered]
+    if dropped:
+        print(
+            f"[simulator_factory] {label}: 未使用のオプションを無視します: {', '.join(dropped)}"
+        )
+    return filtered
 
 
 def _get_simulator(
@@ -320,6 +350,7 @@ def _get_simulator(
                 )
 
     SimulatorClass = get_simulator_class(method_name)
+    method_options = _filter_kwargs_for_class(SimulatorClass, method_options, method_name)
     simulator = SimulatorClass(**(base_kwargs | method_options))
     return simulator
 
