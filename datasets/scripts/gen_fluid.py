@@ -122,8 +122,18 @@ def _merge_dict(default: dict[str, Any], override: dict[str, Any]) -> dict[str, 
     return result
 
 
-def load_config(path: Path) -> FluidDatasetConfig:
-    raw = _load_yaml(path)
+def _load_inline_case(value: str) -> dict[str, Any]:
+    """Load a single case mapping from a YAML/JSON string or file path."""
+    path_candidate = Path(value)
+    if path_candidate.exists():
+        return _load_yaml(path_candidate)
+    data = yaml.safe_load(value)
+    if not isinstance(data, dict):
+        raise ValueError("Inline case must be a mapping (YAML/JSON object).")
+    return data
+
+
+def _build_dataset_config(raw: dict[str, Any]) -> FluidDatasetConfig:
     defaults = raw.get("defaults", {})
     cases_raw = raw.get("cases")
     if not isinstance(cases_raw, Iterable) or isinstance(cases_raw, dict):
@@ -154,7 +164,9 @@ def load_config(path: Path) -> FluidDatasetConfig:
                 # Validate size positivity early
                 obstacles_cfg[-1].bounds()
         case_kwargs = {
-            key: value for key, value in merged.items() if key not in {"domain", "emitter"}
+            key: value
+            for key, value in merged.items()
+            if key not in {"domain", "emitter", "obstacles"}
         }
         case = FluidCaseConfig(
             domain=domain_cfg, emitter=emitter_cfg, obstacles=obstacles_cfg, **case_kwargs
@@ -164,6 +176,11 @@ def load_config(path: Path) -> FluidDatasetConfig:
     if not cases:
         raise ValueError("At least one case must be specified.")
     return FluidDatasetConfig(output_root=output_root, cases=cases)
+
+
+def load_config(path: Path) -> FluidDatasetConfig:
+    raw = _load_yaml(path)
+    return _build_dataset_config(raw)
 
 
 def _ensure_dir(path: Path) -> None:
@@ -334,6 +351,63 @@ class PySPHSimulation:
             velocities += random_vel
         if self._obs_bounds.size:
             positions, velocities = self._resolve_obstacles_numpy(positions, velocities)
+        return positions, velocities
+
+    def _resolve_obstacles_numpy(
+        self, positions: np.ndarray, velocities: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Resolve initial overlaps against analytic obstacles (NumPy arrays)."""
+        if self._obs_bounds.size == 0:
+            return positions, velocities
+        x = positions[:, 0]
+        y = positions[:, 1]
+        u = velocities[:, 0]
+        v = velocities[:, 1]
+        for i in range(self._obs_bounds.shape[0]):
+            xmin, xmax, ymin, ymax = self._obs_bounds[i]
+            margin = float(self._obs_margins[i])
+            damping = float(self._obs_damping[i])
+            inside = (x > xmin) & (x < xmax) & (y > ymin) & (y < ymax)
+            if not np.any(inside):
+                continue
+            xi = np.asarray(x[inside])
+            yi = np.asarray(y[inside])
+            ui = np.asarray(u[inside])
+            vi = np.asarray(v[inside])
+
+            left = xi - xmin
+            right = xmax - xi
+            bottom = yi - ymin
+            top = ymax - yi
+
+            min_lr = np.minimum(left, right)
+            min_tb = np.minimum(bottom, top)
+            hit_x = min_lr < min_tb
+            hit_y = ~hit_x
+
+            if np.any(hit_x):
+                left_hit = hit_x & (left < right)
+                right_hit = hit_x & ~left_hit
+                xi[left_hit] = xmin - margin
+                ui[left_hit] *= -damping
+                xi[right_hit] = xmax + margin
+                ui[right_hit] *= -damping
+            if np.any(hit_y):
+                bottom_hit = hit_y & (bottom < top)
+                top_hit = hit_y & ~bottom_hit
+                yi[bottom_hit] = ymin - margin
+                vi[bottom_hit] *= -damping
+                yi[top_hit] = ymax + margin
+                vi[top_hit] *= -damping
+
+            x[inside] = xi
+            y[inside] = yi
+            u[inside] = ui
+            v[inside] = vi
+        positions[:, 0] = x
+        positions[:, 1] = y
+        velocities[:, 0] = u
+        velocities[:, 1] = v
         return positions, velocities
 
     def _create_boundary_particles(self, layers: int = 2) -> np.ndarray:
@@ -517,6 +591,8 @@ class PySPHSimulation:
             y[above_y] = upper[1] - (y[above_y] - upper[1])
             v[above_y] *= -self.cfg.boundary_damping
 
+        self._apply_obstacle_constraints()
+
     def _record_frame(self) -> None:
         positions = np.stack((np.asarray(self.fluid.x), np.asarray(self.fluid.y)), axis=1).astype(
             np.float32, copy=False
@@ -531,6 +607,56 @@ class PySPHSimulation:
         if len(self.history) >= self._target_frames:
             solver.set_final_time(solver.t)
             solver.set_max_steps(self._substep_counter)
+
+    def _apply_obstacle_constraints(self) -> None:
+        """Reflect particles that intersect analytic obstacles (no obstacle particles)."""
+        if self._obs_bounds.size == 0:
+            return
+        x = self.fluid.x
+        y = self.fluid.y
+        u = self.fluid.u
+        v = self.fluid.v
+        for i in range(self._obs_bounds.shape[0]):
+            xmin, xmax, ymin, ymax = self._obs_bounds[i]
+            margin = float(self._obs_margins[i])
+            damping = float(self._obs_damping[i])
+            inside = (x > xmin) & (x < xmax) & (y > ymin) & (y < ymax)
+            if not np.any(inside):
+                continue
+            xi = np.asarray(x[inside])
+            yi = np.asarray(y[inside])
+            ui = np.asarray(u[inside])
+            vi = np.asarray(v[inside])
+
+            left = xi - xmin
+            right = xmax - xi
+            bottom = yi - ymin
+            top = ymax - yi
+
+            min_lr = np.minimum(left, right)
+            min_tb = np.minimum(bottom, top)
+            hit_x = min_lr < min_tb
+            hit_y = ~hit_x
+
+            if np.any(hit_x):
+                left_hit = hit_x & (left < right)
+                right_hit = hit_x & ~left_hit
+                xi[left_hit] = xmin - margin
+                ui[left_hit] *= -damping
+                xi[right_hit] = xmax + margin
+                ui[right_hit] *= -damping
+            if np.any(hit_y):
+                bottom_hit = hit_y & (bottom < top)
+                top_hit = hit_y & ~bottom_hit
+                yi[bottom_hit] = ymin - margin
+                vi[bottom_hit] *= -damping
+                yi[top_hit] = ymax + margin
+                vi[top_hit] *= -damping
+
+            x[inside] = xi
+            y[inside] = yi
+            u[inside] = ui
+            v[inside] = vi
 
     def rollout(self, timesteps: int) -> np.ndarray:
         self._target_frames = max(1, timesteps)
@@ -596,6 +722,19 @@ def generate_scene(
         "simulator": "pysph_wcsph",
         "sph_backend": "PySPH",
     }
+    if cfg.obstacles:
+        meta["obstacles"] = [
+            {
+                "center": list(obs.center),
+                "size": list(obs.size),
+                "padding": float(obs.padding),
+                "damping": (
+                    float(obs.damping) if obs.damping is not None else float(cfg.boundary_damping)
+                ),
+                "layers": obs.layers,
+            }
+            for obs in cfg.obstacles
+        ]
     return positions, particle_types, meta
 
 
@@ -674,13 +813,25 @@ def run_generation(
     config_path: Path,
     output_root: Path | None = None,
     target_cases: list[str] | None = None,
+    inline_case: str | None = None,
 ) -> None:
-    dataset_cfg = load_config(config_path)
+    if inline_case is None:
+        dataset_cfg = load_config(config_path)
+    else:
+        base_raw = _load_yaml(config_path)
+        raw_case = _load_inline_case(inline_case)
+        assembled_raw = {
+            "output_root": base_raw.get("output_root", "./datasets/out_fluid"),
+            "defaults": base_raw.get("defaults", {}),
+            "cases": [raw_case],
+        }
+        dataset_cfg = _build_dataset_config(assembled_raw)
+
     if output_root is not None:
         dataset_cfg.output_root = output_root.resolve()
 
     cases_to_generate = dataset_cfg.cases
-    if target_cases:
+    if inline_case is None and target_cases:
         available_names = {c.name for c in dataset_cfg.cases}
         invalid = [name for name in target_cases if name not in available_names]
         if invalid:
@@ -738,12 +889,21 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Specify case name(s) to generate. If omitted, all cases in config are generated.",
     )
+    parser.add_argument(
+        "--inline-case",
+        type=str,
+        default=None,
+        help=(
+            "YAML/JSON string or file path for a single case. "
+            "Merges with defaults in the config file and ignores --cases."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    run_generation(args.config, args.output_root, args.cases)
+    run_generation(args.config, args.output_root, args.cases, inline_case=args.inline_case)
 
 
 if __name__ == "__main__":
