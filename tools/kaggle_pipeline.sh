@@ -46,6 +46,10 @@ CODE_SRCS=(
   "pyproject.toml"
   "uv.lock"
 )
+DATASET_VISIBLE_SRCS=(
+  "src"
+  "models"
+)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -190,6 +194,11 @@ if (( ${#missing[@]} )); then
   exit 1
 fi
 rsync -a --delete "${CODE_SRCS[@]/#/${REPO_ROOT}/}" "${CODE_DST}/" 2>&1 | tee -a "$LOG2"
+
+# Kaggle input から直接参照できるように src と models をデータセット直下にも配置
+for src in "${DATASET_VISIBLE_SRCS[@]}"; do
+  rsync -a "${REPO_ROOT}/${src}" "${DATASET_DIR}/" 2>&1 | tee -a "$LOG2"
+done
 
 # バージョン識別用の小さなスタンプを追加して、差分がない場合の 400 エラーを回避（データセット直下に置く）
 echo "generated_by_kaggle_pipeline ${TIMESTAMP} ${GIT_SHA}" > "${DATASET_DIR}/.pipeline_version"
