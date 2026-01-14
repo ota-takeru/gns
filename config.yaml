@@ -76,7 +76,7 @@ model_path: ./models/ # モデルやtrain_stateの保存先
 output_path: ./rollouts/
 output_filename: rollout
 
-batch_size: 16
+batch_size: 8
 noise_std: 0.0003
 noise: random_walk # ノイズ生成の種類（デフォルト従来挙動）
 loss: acceleration # ロス関数（デフォルト従来挙動）
@@ -121,7 +121,7 @@ ddp_find_unused_parameters: true
 amp_enable: true
 amp_dtype: float16
 gradient_accumulation_steps: 1
-num_workers: 4
+num_workers: 2
 persistent_workers: true
 pin_memory: true
 prefetch_factor: 4
