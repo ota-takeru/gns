@@ -7,6 +7,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data.distributed import DistributedSampler
+
 try:  # GPU利用率取得用（存在しなければ無視）
     import pynvml
 
@@ -122,7 +123,9 @@ def train(cfg: Config, device: torch.device):
 
     log_path: Path | None = None
     if is_main_process:
-        log_path = Path(cfg.log_file) if cfg.log_file is not None else Path(cfg.model_path) / "train.log"
+        log_path = (
+            Path(cfg.log_file) if cfg.log_file is not None else Path(cfg.model_path) / "train.log"
+        )
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_fp = log_path.open("a", encoding="utf-8")
@@ -149,10 +152,7 @@ def train(cfg: Config, device: torch.device):
 
         torch_cuda_ver = getattr(torch.version, "cuda", None)
         cudnn_ver = torch.backends.cudnn.version()
-        _log(
-            "[env] torch="
-            f"{torch.__version__} cuda={torch_cuda_ver} cudnn={cudnn_ver}"
-        )
+        _log(f"[env] torch={torch.__version__} cuda={torch_cuda_ver} cudnn={cudnn_ver}")
         dist_backend = dist.get_backend() if dist.is_initialized() else "none"
         _log(
             f"[dist] world_size={cfg.world_size} rank={cfg.rank} "
@@ -246,10 +246,7 @@ def train(cfg: Config, device: torch.device):
             f"[train] batch={cfg.batch_size} accum={accum_steps} "
             f"world_size={cfg.world_size} effective_batch={effective_batch}"
         )
-        _log(
-            f"[train] amp={amp_enabled} dtype={amp_dtype} "
-            f"max_grad_norm={cfg.max_grad_norm}"
-        )
+        _log(f"[train] amp={amp_enabled} dtype={amp_dtype} max_grad_norm={cfg.max_grad_norm}")
         _log(
             "[loader] workers="
             f"{cfg.num_workers} persistent={cfg.persistent_workers} "
@@ -402,9 +399,7 @@ def train(cfg: Config, device: torch.device):
             rollout_loader = data_loader.get_data_loader_by_trajectories(rollout_dataset_path)
             rollout_evaluator = RolloutEvaluator(rollout_loader, device, cfg.rollout_max_examples)
             if is_main_process:
-                _log(
-                    f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}"
-                )
+                _log(f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}")
 
     epoch_train_loss = 0.0
     epoch_valid_loss: torch.Tensor | None = None
@@ -518,7 +513,9 @@ def train(cfg: Config, device: torch.device):
                     if valid_split.get("near") is not None:
                         tb_writer.add_scalar("valid/near_wall", float(valid_split["near"]), step)
                     if valid_split.get("away") is not None:
-                        tb_writer.add_scalar("valid/away_from_wall", float(valid_split["away"]), step)
+                        tb_writer.add_scalar(
+                            "valid/away_from_wall", float(valid_split["away"]), step
+                        )
             else:
                 _log("Warning: validation loader is empty; skipping validation step.")
 
@@ -576,7 +573,7 @@ def train(cfg: Config, device: torch.device):
                 f"lr={current_lr:.6e}",
             ]
             if ema_step_time is not None and ema_step_time > 0:
-                log_parts.append(f"t/step={ema_step_time*1000:.0f}ms")
+                log_parts.append(f"t/step={ema_step_time * 1000:.0f}ms")
                 samples_per_sec = (
                     cfg.batch_size * accum_steps * max(1, cfg.world_size)
                 ) / ema_step_time
@@ -587,9 +584,7 @@ def train(cfg: Config, device: torch.device):
                 log_parts.append(f"gpu={gpu_util:.0f}%")
                 log_parts.append(f"mem={gpu_mem_used:.0f}/{gpu_mem_total_mb:.0f}MB")
             if last_grad_norm_pre_clip is not None and last_grad_norm is not None:
-                log_parts.append(
-                    f"grad_norm={last_grad_norm_pre_clip:.4f}->{last_grad_norm:.4f}"
-                )
+                log_parts.append(f"grad_norm={last_grad_norm_pre_clip:.4f}->{last_grad_norm:.4f}")
             elif last_grad_norm is not None:
                 log_parts.append(f"grad_norm={last_grad_norm:.4f}")
             if latest_valid_loss_value is not None:
@@ -660,9 +655,9 @@ def train(cfg: Config, device: torch.device):
                 tb_writer.add_scalar("train/lr", current_lr, step)
                 if ema_step_time is not None:
                     tb_writer.add_scalar("system/step_time_sec", float(ema_step_time), step)
-                    samples_per_sec = (
-                        cfg.batch_size * accum_steps * max(1, cfg.world_size)
-                    ) / max(ema_step_time, 1e-12)
+                    samples_per_sec = (cfg.batch_size * accum_steps * max(1, cfg.world_size)) / max(
+                        ema_step_time, 1e-12
+                    )
                     tb_writer.add_scalar("system/samples_per_sec", float(samples_per_sec), step)
                 gpu_tb = _get_gpu_stats()
                 if gpu_tb is not None:
