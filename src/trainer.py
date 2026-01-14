@@ -671,67 +671,67 @@ def train(cfg: Config, device: torch.device):
                     tb_writer.add_scalar("system/gpu_mem_used_mb", float(mem_used), step)
                 if gpu_mem_total_mb is not None:
                     tb_writer.add_scalar("system/gpu_mem_total_mb", float(gpu_mem_total_mb), step)
-            if last_grad_norm_pre_clip is not None:
-                tb_writer.add_scalar("train/grad_norm_pre_clip", last_grad_norm_pre_clip, step)
-            if last_grad_norm is not None:
-                tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
-            if latest_valid_loss_value is not None:
-                tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
-                if latest_valid_split is not None:
-                    if latest_valid_split.get("near") is not None:
-                        tb_writer.add_scalar(
-                            "valid/near_wall", float(latest_valid_split["near"]), step
-                        )
-                    if latest_valid_split.get("away") is not None:
-                        tb_writer.add_scalar(
-                            "valid/away_from_wall", float(latest_valid_split["away"]), step
-                        )
-            if (
-                latest_rollout_metrics is not None
-                and latest_rollout_metrics.get("rollout_rmse_mean") is not None
-            ):
-                tb_writer.add_scalar(
-                    "rollout/rmse_mean",
-                    float(latest_rollout_metrics["rollout_rmse_mean"]),
-                    step,
-                )
-                tb_writer.add_scalar(
-                    "rollout/rmse_last",
-                    float(latest_rollout_metrics["rollout_rmse_last"]),
-                    step,
-                )
-                tb_writer.add_scalar(
-                    "rollout/instability",
-                    float(latest_rollout_metrics["rollout_instability"]),
-                    step,
-                )
-            if last_batch_debug_stats:
-                for key_src, key_dst in [
-                    ("a_pair_abs_mean", "train/a_pair_mean"),
-                    ("a_pair_abs_max", "train/a_pair_max"),
-                    ("a_wall_abs_mean", "train/a_wall_mean"),
-                    ("a_wall_abs_max", "train/a_wall_max"),
-                    ("pair_count", "train/pair_count"),
-                    ("dist_mean", "train/pair_dist_mean"),
-                    ("dist_max", "train/pair_dist_max"),
-                    ("w_mean", "train/cutoff_w_mean"),
-                    ("w_max", "train/cutoff_w_max"),
-                    ("w_min", "train/cutoff_w_min"),
-                    ("neighbor_edges_mean", "train/neighbor_edges_mean"),
-                    ("neighbor_edges_max", "train/neighbor_edges_max"),
-                    ("min_d", "train/min_distance"),
-                    ("min_d_edges", "train/min_distance_edges"),
-                    ("a_pred_abs_mean", "train/a_pred_mean"),
-                    ("a_pred_abs_p95", "train/a_pred_p95"),
-                    ("phi_mean", "train/phi_mean"),
-                    ("phi_max", "train/phi_max"),
-                    ("alpha_mean", "train/alpha_mean"),
-                    ("alpha_max", "train/alpha_max"),
-                ]:
-                    val = last_batch_debug_stats.get(key_src)
-                    if val is not None:
-                        tb_writer.add_scalar(key_dst, float(val), step)
-            tb_writer.flush()
+                if last_grad_norm_pre_clip is not None:
+                    tb_writer.add_scalar("train/grad_norm_pre_clip", last_grad_norm_pre_clip, step)
+                if last_grad_norm is not None:
+                    tb_writer.add_scalar("train/grad_norm", last_grad_norm, step)
+                if latest_valid_loss_value is not None:
+                    tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
+                    if latest_valid_split is not None:
+                        if latest_valid_split.get("near") is not None:
+                            tb_writer.add_scalar(
+                                "valid/near_wall", float(latest_valid_split["near"]), step
+                            )
+                        if latest_valid_split.get("away") is not None:
+                            tb_writer.add_scalar(
+                                "valid/away_from_wall", float(latest_valid_split["away"]), step
+                            )
+                if (
+                    latest_rollout_metrics is not None
+                    and latest_rollout_metrics.get("rollout_rmse_mean") is not None
+                ):
+                    tb_writer.add_scalar(
+                        "rollout/rmse_mean",
+                        float(latest_rollout_metrics["rollout_rmse_mean"]),
+                        step,
+                    )
+                    tb_writer.add_scalar(
+                        "rollout/rmse_last",
+                        float(latest_rollout_metrics["rollout_rmse_last"]),
+                        step,
+                    )
+                    tb_writer.add_scalar(
+                        "rollout/instability",
+                        float(latest_rollout_metrics["rollout_instability"]),
+                        step,
+                    )
+                if last_batch_debug_stats:
+                    for key_src, key_dst in [
+                        ("a_pair_abs_mean", "train/a_pair_mean"),
+                        ("a_pair_abs_max", "train/a_pair_max"),
+                        ("a_wall_abs_mean", "train/a_wall_mean"),
+                        ("a_wall_abs_max", "train/a_wall_max"),
+                        ("pair_count", "train/pair_count"),
+                        ("dist_mean", "train/pair_dist_mean"),
+                        ("dist_max", "train/pair_dist_max"),
+                        ("w_mean", "train/cutoff_w_mean"),
+                        ("w_max", "train/cutoff_w_max"),
+                        ("w_min", "train/cutoff_w_min"),
+                        ("neighbor_edges_mean", "train/neighbor_edges_mean"),
+                        ("neighbor_edges_max", "train/neighbor_edges_max"),
+                        ("min_d", "train/min_distance"),
+                        ("min_d_edges", "train/min_distance_edges"),
+                        ("a_pred_abs_mean", "train/a_pred_mean"),
+                        ("a_pred_abs_p95", "train/a_pred_p95"),
+                        ("phi_mean", "train/phi_mean"),
+                        ("phi_max", "train/phi_max"),
+                        ("alpha_mean", "train/alpha_mean"),
+                        ("alpha_max", "train/alpha_max"),
+                    ]:
+                        val = last_batch_debug_stats.get(key_src)
+                        if val is not None:
+                            tb_writer.add_scalar(key_dst, float(val), step)
+                tb_writer.flush()
 
         if is_main_process and cfg.nsave_steps and step % cfg.nsave_steps == 0:
             save_model_and_train_state(
