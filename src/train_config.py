@@ -67,6 +67,8 @@ class Config:
     ddp_backend: str = "nccl"
     ddp_timeout_sec: int = 1800
     ddp_find_unused_parameters: bool = False
+    ddp_async_error_handling: bool = False
+    ddp_torch_distributed_debug: str | None = None  # "INFO" / "DETAIL" / None
     amp_enable: bool = False
     amp_dtype: str = "float16"
     gradient_accumulation_steps: int = 1

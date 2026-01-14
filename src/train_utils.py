@@ -134,6 +134,8 @@ def _asjsonable_cfg(cfg: Config) -> dict[str, Any]:
         "ddp_backend": cfg.ddp_backend,
         "ddp_timeout_sec": cfg.ddp_timeout_sec,
         "ddp_find_unused_parameters": cfg.ddp_find_unused_parameters,
+        "ddp_async_error_handling": cfg.ddp_async_error_handling,
+        "ddp_torch_distributed_debug": cfg.ddp_torch_distributed_debug,
         "amp_enable": cfg.amp_enable,
         "amp_dtype": cfg.amp_dtype,
         "gradient_accumulation_steps": cfg.gradient_accumulation_steps,
@@ -195,6 +197,12 @@ def _init_distributed(cfg: Config) -> tuple[bool, int, int, int]:
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if dist.is_initialized():
         return True, rank, world_size, local_rank
+    if cfg.ddp_async_error_handling:
+        os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+    if cfg.ddp_torch_distributed_debug:
+        os.environ.setdefault(
+            "TORCH_DISTRIBUTED_DEBUG", str(cfg.ddp_torch_distributed_debug).upper()
+        )
 
     timeout = timedelta(seconds=cfg.ddp_timeout_sec)
     dist.init_process_group(

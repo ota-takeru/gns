@@ -115,9 +115,11 @@ cuda_device_number: null
 seed: 42
 enable_ddp: true
 ddp_backend: nccl
-ddp_timeout_sec: 1800
+ddp_timeout_sec: 600 # 5分でタイムアウト（デバッグ用に短縮）
 # 使われていないパラメータを探すかどうか（デフォルト: true）
 ddp_find_unused_parameters: true
+ddp_async_error_handling: true # NCCLの非同期エラー検出を有効化
+ddp_torch_distributed_debug: DETAIL # collective順序ズレを追いやすくするログ
 amp_enable: true
 amp_dtype: float16
 gradient_accumulation_steps: 1
