@@ -41,6 +41,49 @@ def _resolve_particle_spacing(meta: dict | None, cfg: DatasetConfig | None = Non
     return None
 
 
+def _draw_domain(ax: plt.Axes, bounds: np.ndarray | None) -> None:
+    if bounds is None or bounds.shape != (2, 2):
+        return
+    (xmin, xmax), (ymin, ymax) = bounds
+    rect = plt.Rectangle(
+        (xmin, ymin),
+        xmax - xmin,
+        ymax - ymin,
+        fill=False,
+        edgecolor="black",
+        linewidth=1.0,
+        linestyle="-",
+        alpha=0.8,
+    )
+    ax.add_patch(rect)
+
+
+def _draw_obstacles(ax: plt.Axes, obstacles: list[dict] | None) -> None:
+    if not obstacles:
+        return
+    for obs in obstacles:
+        center = obs.get("center")
+        size = obs.get("size")
+        if not center or not size or len(center) != 2 or len(size) != 2:
+            continue
+        cx, cy = center
+        sx, sy = size
+        padding = float(obs.get("padding", 0.0) or 0.0)
+        width = sx + padding * 2
+        height = sy + padding * 2
+        rect = plt.Rectangle(
+            (cx - width * 0.5, cy - height * 0.5),
+            width,
+            height,
+            fill=True,
+            facecolor="#c0c0c0",
+            edgecolor="#444444",
+            linewidth=1.0,
+            alpha=0.35,
+        )
+        ax.add_patch(rect)
+
+
 def _resolve_marker_scale(meta: dict | None, cfg: DatasetConfig) -> float:
     if meta is not None:
         scale = meta.get("visualization_marker_scale")
@@ -127,6 +170,13 @@ def main():
 
     marker_scale = _resolve_marker_scale(meta, cfg)
     marker_size = _compute_marker_size(_resolve_particle_spacing(meta, cfg), marker_scale)
+    bounds = None
+    obstacles = None
+    if meta is not None:
+        b = meta.get("bounds")
+        if b is not None:
+            bounds = np.asarray(b, dtype=np.float32)
+        obstacles = meta.get("obstacles")
 
     fig, ax = plt.subplots()
     colors = None
@@ -151,9 +201,18 @@ def main():
             **scatter_kwargs,
         )
 
-    ax.set_xlim(pos[..., 0].min() - 1, pos[..., 0].max() + 1)
-    ax.set_ylim(pos[..., 1].min() - 1, pos[..., 1].max() + 1)
-    ax.set_aspect("equal")
+    _draw_domain(ax, bounds)
+    _draw_obstacles(ax, obstacles if isinstance(obstacles, list) else None)
+
+    if bounds is not None:
+        (xmin, xmax), (ymin, ymax) = bounds
+        pad = 0.1 * max(1.0, float(xmax - xmin))
+        ax.set_xlim(xmin - pad, xmax + pad)
+        ax.set_ylim(ymin - pad, ymax + pad)
+    else:
+        ax.set_xlim(pos[..., 0].min() - 1, pos[..., 0].max() + 1)
+        ax.set_ylim(pos[..., 1].min() - 1, pos[..., 1].max() + 1)
+    ax.set_aspect("equal", adjustable="box")
 
     def update(frame: int):
         sc.set_offsets(pos[frame])
