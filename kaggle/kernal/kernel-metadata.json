@@ -12,7 +12,8 @@
         "takerv/dam-break-left",
         "takerv/dam-break-left-wall2",
         "takerv/dam-break-left-periodic-zero-g",
-        "takerv/gns-40k-100-20"
+        "takerv/gns-40k-100-20",
+        "takerv/tank-sloshing-mid-800"
     ],
     
 
