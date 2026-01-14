@@ -7,6 +7,7 @@
 - Python 実行・依存管理は `uv` 優先（README 記載）。必要に応じて `uv run ...` で python を呼ぶ。
 - サンドボックス: `workspace-write`。ネットワークは `restricted`（外部通信や Kaggle CLI 利用は事前に確認）。
 - 言語は日本語で回答する。
+- `uv run` が `.cache/uv/...` の権限で弾かれる場合は、同梱の `.venv/bin/python` を直接使う（例: `.venv/bin/python datasets/scripts/gen_fluid.py ...`）。`source .venv/bin/activate` でも可。
 
 ## 主要スクリプト・コマンド
 - 依存インストール: `uv sync` （ネット要確認）。

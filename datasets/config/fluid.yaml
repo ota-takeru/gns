@@ -8,6 +8,7 @@ defaults:
   kernel_radius_scale: 2.0
   rest_density: 1000.0
   stiffness: 2000.0
+  sound_speed: 40.0
   viscosity: 45.0
   boundary_damping: 0.35
   boundary_clamp_limit: 1.0
@@ -44,6 +45,26 @@ cases:
     boundary_mode: periodic
     boundary_clamp_limit: 0.0
     wall_particle_layers: 0
+
+  - name: tank_sloshing
+    seed: 310
+    output_subdir: tank_sloshing
+    dt: 0.003
+    timesteps: 720
+    emitter:
+      origin: [-4.2, 0.3]
+      size: [8.4, 2.4]
+      jitter: 0.05
+      random_velocity_scale: 0.25
+      fill_ratio_range: [0.9, 1.0]
+    wall_particle_layers: 2
+    tank_motion:
+      axis: x
+      amplitude: 4.0
+      frequency: 0.85
+      phase: 0.0
+      ramp_time: 0.6
+      offset: 0.0
 
   # - name: dam_break_right
   #   seed: 200

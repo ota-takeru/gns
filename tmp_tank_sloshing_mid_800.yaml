@@ -1,0 +1,20 @@
+name: tank_sloshing_mid_800
+output_subdir: tank_sloshing_mid_800
+timesteps: 800
+solver_substeps: 4
+wall_particle_layers: 3
+num_train_scenes: 100
+num_valid_scenes: 20
+emitter:
+  origin: [-4.2, 0.2] # ドメイン中央付近に初期水位を上げる
+  size: [3.4, 4.4]
+  jitter: 0.05
+  random_velocity_scale: 0.15
+  fill_ratio_range: [0.95, 1.05]
+tank_motion:
+  axis: x
+  amplitude: 4.0
+  frequency: 1.0
+  phase: 0.0
+  ramp_time: 0.5
+  offset: 0.0

@@ -67,6 +67,32 @@ class ObstacleConfig:
 
 
 @dataclass
+class TankMotionConfig:
+    """Sinusoidal加速度でタンクを揺する設定（スロッシング用）。"""
+
+    axis: str = "x"
+    amplitude: float = 4.0  # m/s^2 揺動の強さ
+    frequency: float = 0.8  # Hz
+    phase: float = 0.0  # rad
+    ramp_time: float = 0.2  # s 立ち上がり時間
+    offset: float = 0.0  # 定常加速度
+
+    def axis_index(self) -> int:
+        ax = self.axis.lower()
+        if ax not in {"x", "y"}:
+            raise ValueError("tank_motion.axis must be 'x' or 'y'.")
+        return 0 if ax == "x" else 1
+
+    def acceleration(self, t: float) -> float:
+        omega = 2.0 * math.pi * self.frequency
+        base = self.amplitude * math.sin(omega * t + self.phase) + self.offset
+        if self.ramp_time > 0:
+            ramp = min(1.0, max(0.0, t / self.ramp_time))
+            return base * ramp
+        return base
+
+
+@dataclass
 class FluidCaseConfig:
     name: str
     output_subdir: str | None = None
@@ -79,6 +105,7 @@ class FluidCaseConfig:
     kernel_radius_scale: float = 2.0
     rest_density: float = 1000.0
     stiffness: float = 2000.0
+    sound_speed: float = 40.0
     viscosity: float = 40.0
     boundary_damping: float = 0.5
     boundary_clamp_limit: float = 1.0
@@ -91,6 +118,7 @@ class FluidCaseConfig:
     domain: DomainConfig = field(default_factory=DomainConfig)
     emitter: EmitterConfig = field(default_factory=EmitterConfig)
     obstacles: list[ObstacleConfig] = field(default_factory=list)
+    tank_motion: Optional[TankMotionConfig] = None
 
     def resolve_output_dir(self, root: Path) -> Path:
         return root / (self.output_subdir or self.name)
@@ -125,8 +153,12 @@ def _merge_dict(default: dict[str, Any], override: dict[str, Any]) -> dict[str, 
 def _load_inline_case(value: str) -> dict[str, Any]:
     """Load a single case mapping from a YAML/JSON string or file path."""
     path_candidate = Path(value)
-    if path_candidate.exists():
-        return _load_yaml(path_candidate)
+    try:
+        if path_candidate.exists():
+            return _load_yaml(path_candidate)
+    except OSError:
+        # Treat overly long or invalid paths as inline YAML/JSON strings
+        pass
     data = yaml.safe_load(value)
     if not isinstance(data, dict):
         raise ValueError("Inline case must be a mapping (YAML/JSON object).")
@@ -163,13 +195,23 @@ def _build_dataset_config(raw: dict[str, Any]) -> FluidDatasetConfig:
                     raise ValueError(f"Invalid obstacle #{idx}: {exc}") from exc
                 # Validate size positivity early
                 obstacles_cfg[-1].bounds()
+        tank_motion_cfg: Optional[TankMotionConfig] = None
+        raw_tank_motion = merged.get("tank_motion")
+        if raw_tank_motion is not None:
+            if not isinstance(raw_tank_motion, dict):
+                raise ValueError("`tank_motion` must be a mapping when provided.")
+            tank_motion_cfg = TankMotionConfig(**raw_tank_motion)
         case_kwargs = {
             key: value
             for key, value in merged.items()
-            if key not in {"domain", "emitter", "obstacles"}
+            if key not in {"domain", "emitter", "obstacles", "tank_motion"}
         }
         case = FluidCaseConfig(
-            domain=domain_cfg, emitter=emitter_cfg, obstacles=obstacles_cfg, **case_kwargs
+            domain=domain_cfg,
+            emitter=emitter_cfg,
+            obstacles=obstacles_cfg,
+            tank_motion=tank_motion_cfg,
+            **case_kwargs,
         )
         cases.append(case)
 
@@ -243,6 +285,10 @@ class PySPHSimulation:
             0.0 if self.boundary_mode == BOUNDARY_MODE_PERIODIC else self.spacing * 0.5
         )
         self.obstacles = cfg.obstacles
+        self.tank_motion = cfg.tank_motion
+        self._tank_axis_idx = (
+            None if self.tank_motion is None else int(self.tank_motion.axis_index())
+        )
         (
             self._obs_bounds,
             self._obs_margins,
@@ -251,6 +297,8 @@ class PySPHSimulation:
         self.domain_manager = self._build_domain_manager()
 
         self.positions0, self.velocities0 = self._initialize_particles()
+        self._steps_per_frame = max(1, self.substeps)
+        self._solver_dt = self.dt / self._steps_per_frame
         (
             self.fluid,
             self.boundary,
@@ -416,7 +464,7 @@ class PySPHSimulation:
         left, bottom = self.domain_min
         right, top = self.domain_max
         for layer in range(layers):
-            offset = layer * self.spacing * 0.5
+            offset = layer * self.spacing
             x_vals = np.arange(left - offset, right + offset + self.spacing, self.spacing)
             y_vals = np.arange(bottom - offset, top + offset + self.spacing, self.spacing)
             xs.extend(x_vals)
@@ -439,10 +487,23 @@ class PySPHSimulation:
         # Late imports for typing; guarded by constructor check above.
         from pysph.base.utils import get_particle_array_wcsph
 
-        sound_speed = math.sqrt(max(self.cfg.stiffness, 1e-6) / max(self.cfg.rest_density, 1e-6))
+        sound_speed = float(self.cfg.sound_speed)
+        if sound_speed <= 0:
+            raise ValueError("sound_speed must be positive.")
         nu = (
             self.cfg.viscosity / max(self.cfg.rest_density, 1e-6) if self.cfg.viscosity > 0 else 0.0
         )
+        configured_sub_dt = self.dt / self.substeps
+        # CFL (viscous項含む) でかなり保守的に刻み幅を制限する
+        cfl_dt = 0.125 * self.h / sound_speed if sound_speed > 0 else configured_sub_dt
+        sub_dt = configured_sub_dt
+        if sub_dt > cfl_dt:
+            print(
+                f"[{self.cfg.name}] sub_dt {sub_dt:.6f} clamped to {cfl_dt:.6f} for CFL (h={self.h:.4f}, c0={sound_speed:.4f})"
+            )
+            sub_dt = cfl_dt
+        steps_per_frame = max(1, int(math.ceil(self.dt / sub_dt)))
+        sub_dt = self.dt / steps_per_frame
 
         fluid = get_particle_array_wcsph(
             name="fluid",
@@ -452,7 +513,8 @@ class PySPHSimulation:
         boundary_coords = np.empty((0, 2), dtype=np.float32)
         solids: list[str] = []
         if self.boundary_mode == BOUNDARY_MODE_WALLS:
-            boundary_coords = self._create_boundary_particles(layers=2)
+            wall_layers = max(3, int(self.cfg.wall_particle_layers))
+            boundary_coords = self._create_boundary_particles(layers=wall_layers)
             solids = ["boundary"]
         boundary = get_particle_array_wcsph(
             name="boundary",
@@ -487,14 +549,18 @@ class PySPHSimulation:
             nu=nu,
             summation_density=False,
         )
-        sub_dt = self.dt / self.substeps
         tf = max(0.0, (self.cfg.timesteps - 1) * self.dt)
         scheme.configure_solver(dt=sub_dt, tf=tf, pfreq=0, n_damp=0)
+        print(
+            f"[{self.cfg.name}] h {self.h:.4f} dx {self.spacing:.4f} c0 {sound_speed:.4f} sub_dt {sub_dt:.6f} steps/frame {steps_per_frame}"
+        )
         solver = scheme.solver
         solver.set_disable_output(True)
         solver.set_output_at_times([])
         solver.set_print_freq(int(1e9))  # effectively silences progress dumps
         solver.set_max_steps(int(max(1, math.ceil(tf / sub_dt) * 2)))
+        self._steps_per_frame = steps_per_frame
+        self._solver_dt = sub_dt
         if not hasattr(solver, "pm"):
             solver.pm = None  # PySPH < 1.0b2 safety: ensure attribute exists
         if self.domain_manager is not None:
@@ -553,45 +619,18 @@ class PySPHSimulation:
             )
         return DomainManager(**filtered)
 
-    def _wrap_periodic_positions(self) -> None:
-        span = self.domain_max - self.domain_min
-        if np.any(span <= 0):
-            raise ValueError("Invalid domain size for periodic wrapping.")
-        x = self.fluid.x
-        y = self.fluid.y
-        x[:] = self.domain_min[0] + np.mod(x - self.domain_min[0], span[0])
-        y[:] = self.domain_min[1] + np.mod(y - self.domain_min[1], span[1])
-
-    def _apply_boundary_constraints(self) -> None:
-        if self.boundary_mode == BOUNDARY_MODE_PERIODIC:
-            self._wrap_periodic_positions()
+    def _apply_tank_motion(self, solver: "Solver") -> None:
+        """タンクの水平揺動を外力として速度に加える。"""
+        if self.tank_motion is None or self._tank_axis_idx is None:
             return
-        lower = self.domain_min + self.boundary_margin
-        upper = self.domain_max - self.boundary_margin
-        x = self.fluid.x
-        y = self.fluid.y
-        u = self.fluid.u
-        v = self.fluid.v
-
-        below_x = x < lower[0]
-        above_x = x > upper[0]
-        if np.any(below_x):
-            x[below_x] = lower[0] + (lower[0] - x[below_x])
-            u[below_x] *= -self.cfg.boundary_damping
-        if np.any(above_x):
-            x[above_x] = upper[0] - (x[above_x] - upper[0])
-            u[above_x] *= -self.cfg.boundary_damping
-
-        below_y = y < lower[1]
-        above_y = y > upper[1]
-        if np.any(below_y):
-            y[below_y] = lower[1] + (lower[1] - y[below_y])
-            v[below_y] *= -self.cfg.boundary_damping
-        if np.any(above_y):
-            y[above_y] = upper[1] - (y[above_y] - upper[1])
-            v[above_y] *= -self.cfg.boundary_damping
-
-        self._apply_obstacle_constraints()
+        dt = float(getattr(solver, "dt", self._solver_dt))
+        if dt <= 0:
+            return
+        accel = float(self.tank_motion.acceleration(float(getattr(solver, "t", 0.0))))
+        if accel == 0.0:
+            return
+        target = self.fluid.u if self._tank_axis_idx == 0 else self.fluid.v
+        target[:] = target + accel * dt
 
     def _record_frame(self) -> None:
         positions = np.stack((np.asarray(self.fluid.x), np.asarray(self.fluid.y)), axis=1).astype(
@@ -601,68 +640,17 @@ class PySPHSimulation:
 
     def _on_post_step(self, solver: "Solver") -> None:
         self._substep_counter += 1
-        self._apply_boundary_constraints()
-        if self._substep_counter % self.substeps == 0:
+        self._apply_tank_motion(solver)
+        if self._substep_counter % self._steps_per_frame == 0:
             self._record_frame()
         if len(self.history) >= self._target_frames:
             solver.set_final_time(solver.t)
             solver.set_max_steps(self._substep_counter)
 
-    def _apply_obstacle_constraints(self) -> None:
-        """Reflect particles that intersect analytic obstacles (no obstacle particles)."""
-        if self._obs_bounds.size == 0:
-            return
-        x = self.fluid.x
-        y = self.fluid.y
-        u = self.fluid.u
-        v = self.fluid.v
-        for i in range(self._obs_bounds.shape[0]):
-            xmin, xmax, ymin, ymax = self._obs_bounds[i]
-            margin = float(self._obs_margins[i])
-            damping = float(self._obs_damping[i])
-            inside = (x > xmin) & (x < xmax) & (y > ymin) & (y < ymax)
-            if not np.any(inside):
-                continue
-            xi = np.asarray(x[inside])
-            yi = np.asarray(y[inside])
-            ui = np.asarray(u[inside])
-            vi = np.asarray(v[inside])
-
-            left = xi - xmin
-            right = xmax - xi
-            bottom = yi - ymin
-            top = ymax - yi
-
-            min_lr = np.minimum(left, right)
-            min_tb = np.minimum(bottom, top)
-            hit_x = min_lr < min_tb
-            hit_y = ~hit_x
-
-            if np.any(hit_x):
-                left_hit = hit_x & (left < right)
-                right_hit = hit_x & ~left_hit
-                xi[left_hit] = xmin - margin
-                ui[left_hit] *= -damping
-                xi[right_hit] = xmax + margin
-                ui[right_hit] *= -damping
-            if np.any(hit_y):
-                bottom_hit = hit_y & (bottom < top)
-                top_hit = hit_y & ~bottom_hit
-                yi[bottom_hit] = ymin - margin
-                vi[bottom_hit] *= -damping
-                yi[top_hit] = ymax + margin
-                vi[top_hit] *= -damping
-
-            x[inside] = xi
-            y[inside] = yi
-            u[inside] = ui
-            v[inside] = vi
-
     def rollout(self, timesteps: int) -> np.ndarray:
         self._target_frames = max(1, timesteps)
         self.history = []
         self._substep_counter = 0
-        self._apply_boundary_constraints()
         self.nnps.update()
         self._record_frame()
         if timesteps <= 1:
@@ -691,11 +679,14 @@ def generate_scene(
     dynamic_count = positions.shape[1]
 
     wall_coords = np.empty((0, 2), dtype=np.float32)
-    if cfg.boundary_mode != BOUNDARY_MODE_PERIODIC and cfg.wall_particle_layers > 0:
-        wall_coords = sim._create_boundary_particles(layers=cfg.wall_particle_layers)
-        if len(wall_coords):
-            wall_positions = np.repeat(wall_coords[None, :, :], positions.shape[0], axis=0)
-            positions = np.concatenate([positions, wall_positions], axis=1)
+    wall_layers = max(0, int(cfg.wall_particle_layers))
+    if cfg.boundary_mode != BOUNDARY_MODE_PERIODIC:
+        wall_layers = max(3, wall_layers)
+        if wall_layers > 0:
+            wall_coords = sim._create_boundary_particles(layers=wall_layers)
+            if len(wall_coords):
+                wall_positions = np.repeat(wall_coords[None, :, :], positions.shape[0], axis=0)
+                positions = np.concatenate([positions, wall_positions], axis=1)
 
     n_wall = int(wall_coords.shape[0])
     particle_types = np.zeros(dynamic_count + n_wall, dtype=np.int32)
@@ -709,6 +700,7 @@ def generate_scene(
         "particle_spacing": cfg.particle_spacing,
         "rest_density": cfg.rest_density,
         "stiffness": cfg.stiffness,
+        "sound_speed": cfg.sound_speed,
         "viscosity": cfg.viscosity,
         "timesteps": cfg.timesteps,
         "bounds": cfg.domain.as_array().tolist(),
@@ -716,12 +708,22 @@ def generate_scene(
         "boundary_damping": cfg.boundary_damping,
         "boundary_augment": cfg.boundary_clamp_limit,
         "wall_particles": int(n_wall),
-        "wall_particle_layers": int(cfg.wall_particle_layers),
+        "wall_particle_layers": int(wall_layers),
         "boundary_mode": cfg.boundary_mode,
         "note": "synthetic 2D SPH fluid scene",
         "simulator": "pysph_wcsph",
         "sph_backend": "PySPH",
     }
+    if cfg.tank_motion is not None:
+        meta["tank_motion"] = {
+            "axis": cfg.tank_motion.axis,
+            "amplitude": float(cfg.tank_motion.amplitude),
+            "frequency": float(cfg.tank_motion.frequency),
+            "phase": float(cfg.tank_motion.phase),
+            "ramp_time": float(cfg.tank_motion.ramp_time),
+            "offset": float(cfg.tank_motion.offset),
+            "description": "sinusoidal horizontal acceleration applied to fluid for tank sloshing",
+        }
     if cfg.obstacles:
         meta["obstacles"] = [
             {
@@ -758,6 +760,18 @@ def save_scene_npz(
     return path
 
 
+def _load_scene_npz(path: Path) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    data = np.load(path, allow_pickle=True)
+    pos = data["position"]
+    ptypes = data["particle_type"]
+    meta_raw = data["meta"][()]
+    try:
+        meta = json.loads(str(meta_raw))
+    except Exception:
+        meta = {}
+    return pos, ptypes, meta
+
+
 def _generate_split(
     cfg: FluidCaseConfig,
     out_dir: Path,
@@ -768,16 +782,47 @@ def _generate_split(
     if num_scenes <= 0:
         return
     print(f"\n[{cfg.name}] Generating {num_scenes} {split} scenes...")
-    trajectories: list[np.ndarray] = []
-    particle_types_list: list[np.ndarray] = []
+    entries: list[tuple[np.ndarray, np.ndarray, dict[str, Any]] | None] = [
+        None for _ in range(num_scenes)
+    ]
+
+    split_dir = out_dir / split
+    existing_files = sorted(split_dir.glob("scene_*.npz"))
+    for path in existing_files:
+        try:
+            idx = int(path.stem.split("_")[-1])
+        except ValueError:
+            continue
+        if idx < 0 or idx >= num_scenes:
+            continue
+        pos, ptypes, meta = _load_scene_npz(path)
+        entries[idx] = (pos, ptypes, meta)
+
+    if existing_files:
+        kept = sum(e is not None for e in entries)
+        skipped = len(existing_files) - kept
+        print(f"[{cfg.name}] Found {kept}/{num_scenes} existing {split} scenes (skipped {skipped})")
+
     last_meta: dict[str, Any] | None = None
     for idx in range(num_scenes):
+        if entries[idx] is not None:
+            last_meta = entries[idx][2]
+            continue
         scene_seed = cfg.seed + seed_offset + idx
         positions, particle_types, meta = generate_scene(cfg, scene_seed)
         save_scene_npz(out_dir, idx, positions, particle_types, meta, split=split)
+        entries[idx] = (positions, particle_types, meta)
+        last_meta = meta
+
+    # Flatten to lists (only filled entries)
+    trajectories: list[np.ndarray] = []
+    particle_types_list: list[np.ndarray] = []
+    for entry in entries:
+        if entry is None:
+            continue
+        positions, particle_types, _ = entry
         trajectories.append(positions)
         particle_types_list.append(particle_types)
-        last_meta = meta
 
     if trajectories and last_meta is not None:
         extra_metadata = {
@@ -786,6 +831,7 @@ def _generate_split(
                 "particle_spacing",
                 "rest_density",
                 "stiffness",
+                "sound_speed",
                 "viscosity",
                 "bounds",
                 "boundary_augment",
@@ -793,6 +839,7 @@ def _generate_split(
                 "wall_particles",
                 "wall_particle_layers",
                 "boundary_mode",
+                "tank_motion",
             )
             if key in last_meta
         }
