@@ -499,8 +499,8 @@ class GNSSimulator(BaseSimulator):
         state_dict = torch.load(path, map_location=torch.device("cpu"))
 
         # 互換性: edge_relative_velocity 導入前に学習したチェックポイントは
-        # エッジ入力次元が 3 のまま。現在のモデルが 6 次元を期待する場合は、
-        # 既存重みをコピーし、新規チャネルを 0 でパディングして読み込む。
+        # エッジ入力次元が 3 のまま。現在のモデルは base_nedge_in+2 を期待するので、
+        # 既存重みをコピーし、足りない分を 0 でパディングする。
         weight_key = "_encode_process_decode.encoder.edge_fn.0.NN-0.weight"
         if weight_key in state_dict:
             current_weight = self._encode_process_decode.encoder.edge_fn[0][0].weight
@@ -508,19 +508,28 @@ class GNSSimulator(BaseSimulator):
             loaded_weight = state_dict[weight_key]
             loaded_in = loaded_weight.shape[1]
             if loaded_in != target_in:
-                if loaded_in < target_in and self._edge_relative_velocity:
-                    pad_cols = target_in - loaded_in
-                    pad = torch.zeros(
-                        loaded_weight.shape[0],
-                        pad_cols,
-                        device=loaded_weight.device,
-                        dtype=loaded_weight.dtype,
-                    )
-                    state_dict[weight_key] = torch.cat([loaded_weight, pad], dim=1)
-                    print(
-                        "[learned_simulator] 旧チェックポイントを edge_relative_velocity "
-                        "対応に合わせるため、edge MLP 入力重みをパディングしました。"
-                    )
+                if self._edge_relative_velocity:
+                    if loaded_in < target_in:
+                        pad_cols = target_in - loaded_in
+                        pad = torch.zeros(
+                            loaded_weight.shape[0],
+                            pad_cols,
+                            device=loaded_weight.device,
+                            dtype=loaded_weight.dtype,
+                        )
+                        state_dict[weight_key] = torch.cat([loaded_weight, pad], dim=1)
+                        print(
+                            "[learned_simulator] 旧チェックポイントを edge_relative_velocity "
+                            "対応に合わせるため、edge MLP 入力重みをパディングしました。"
+                        )
+                    else:
+                        # 以前の実装では edge_relative_velocity で余分なチャネルを期待していた。
+                        # 現在の入力次元に合わせて末尾を切り詰める。
+                        state_dict[weight_key] = loaded_weight[:, :target_in]
+                        print(
+                            "[learned_simulator] edge_relative_velocity の次元変更に合わせ、"
+                            "edge MLP 入力重みを切り詰めました。"
+                        )
                 else:
                     raise RuntimeError(
                         f"Edge MLP 入力次元が一致しません (checkpoint {loaded_in} != model {target_in}). "
