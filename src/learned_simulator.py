@@ -312,7 +312,6 @@ class GNSSimulator(BaseSimulator):
         ) / velocity_stats["std"]
         flat_velocity_sequence = normalized_velocity_sequence.view(nparticles, -1)
         node_features_list.append(flat_velocity_sequence)
-        most_recent_velocity = normalized_velocity_sequence[:, -1]
 
         if self._boundary_mode == BOUNDARY_MODE_PERIODIC:
             boundary_feature_dim = int(self._boundaries.shape[0]) * 2
@@ -368,15 +367,26 @@ class GNSSimulator(BaseSimulator):
 
         edge_features_list = [normalized_relative_displacements, normalized_relative_distances]
         if self._edge_relative_velocity:
-            relative_velocities = (
-                most_recent_velocity[senders, :] - most_recent_velocity[receivers, :]
-            )  # [E, D]
-            # 法線（接線）分解: r_hat は正規化済み相対変位
+            # 法線/接線分解は「生の速度差分」で行い、最後にスカラーで正規化する
+            most_recent_velocity_raw = velocity_sequence[:, -1]  # [N, D]
+            rel_v = most_recent_velocity_raw[senders, :] - most_recent_velocity_raw[receivers, :]  # [E, D]
             eps = 1e-8
-            r_hat = normalized_relative_displacements / (normalized_relative_distances + eps)
-            normal_speed = (relative_velocities * r_hat).sum(dim=-1, keepdim=True)  # [E, 1]
-            tangential_vel = relative_velocities - normal_speed * r_hat  # [E, D]
-            edge_features_list.extend([normal_speed, tangential_vel])
+            dist = torch.norm(relative_displacements, dim=-1, keepdim=True)  # [E, 1]
+            r_hat = relative_displacements / (dist + eps)  # 単位ベクトル（幾何に忠実）
+            v_n = (rel_v * r_hat).sum(dim=-1, keepdim=True)  # [E, 1]
+            v_t = rel_v - v_n * r_hat  # [E, D]
+            v_t_mag = torch.norm(v_t, dim=-1, keepdim=True)  # [E, 1]
+
+            v_std = velocity_stats["std"]
+            if torch.is_tensor(v_std):
+                v_scale = v_std.mean()
+            else:
+                v_scale = torch.as_tensor(v_std, device=rel_v.device, dtype=rel_v.dtype).mean()
+
+            v_n = v_n / (v_scale + eps)
+            v_t_mag = v_t_mag / (v_scale + eps)
+
+            edge_features_list.extend([v_n, v_t_mag])
         edge_features = torch.cat(edge_features_list, dim=-1)
 
         # ------edge_indexの計算------
