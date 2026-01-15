@@ -38,6 +38,24 @@ cases:
     wall_particle_layers: 2
     boundary_mode: walls
 
+  - name: dam_break_left_slosh
+    seed: 120
+    output_subdir: dam_break_left_slosh
+    num_train_scenes: 50
+    num_valid_scenes: 10
+    timesteps: 1000
+    dt: 0.003
+    solver_substeps: 4
+    wall_particle_layers: 3
+    viscosity: 45.0
+    boundary_damping: 0.35
+    xsph_factor: 0.05
+    emitter:
+      fill_ratio_range: [1.0, 1.05]
+      initial_velocity: [0.5, 0.0]
+      random_velocity_scale: 0.4
+    boundary_mode: walls
+
   - name: dam_break_left_periodic_zero_g
     seed: 150
     output_subdir: dam_break_left_periodic_zero_g

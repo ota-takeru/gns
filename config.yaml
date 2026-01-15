@@ -6,10 +6,10 @@ scenario_options:
     dataset: ./datasets/out
     description: Default planar rigid-body scenes
   fluid:
-    dataset: ./datasets/out_fluid/dam_break_left_wall2
+    dataset: ./datasets/out_fluid/ank-sloshing-mid-800
     rollout_dataset: valid
     description: PySPH-based dam break fluid dataset
-method: hamiltonian_sph
+method: gns
 method_options:
   hamiltonian_sph:
     particle_mass: null # 未指定ならメタデータから自動推定
