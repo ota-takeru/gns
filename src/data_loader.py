@@ -19,6 +19,7 @@ class SamplesDataset(torch.utils.data.Dataset):
         *,
         fraction: float | None = None,
         max_trajectories: int | None = None,
+        max_steps_per_trajectory: int | None = None,
     ):
         super().__init__()
         # load dataset stored in npz format
@@ -44,14 +45,17 @@ class SamplesDataset(torch.utils.data.Dataset):
         self._dimension = self._data[0][0].shape[-1]
         self._input_length_sequence = input_length_sequence
         self._material_property_as_feature = True if len(self._data[0]) >= 3 else False
-        if self._material_property_as_feature:  # if raw data includes material_property
-            self._data_lengths = [
-                x.shape[0] - self._input_length_sequence for x, _, _ in self._data
-            ]
-        else:
-            self._data_lengths = [
-                x.shape[0] - self._input_length_sequence for x, _ in self._data
-            ]
+        self._data_lengths = []
+        for traj in self._data:
+            total_len = traj[0].shape[0]
+            effective = total_len - self._input_length_sequence
+            if effective <= 0:
+                continue  # ignore degenerate trajectory
+            if max_steps_per_trajectory is not None:
+                effective = min(effective, max(1, int(max_steps_per_trajectory)))
+            self._data_lengths.append(effective)
+        if not self._data_lengths:
+            raise ValueError("All trajectories are shorter than input_length_sequence.")
         self._length = sum(self._data_lengths)
 
         # pre-compute cumulative lengths
@@ -240,6 +244,7 @@ def get_data_loader_by_samples(
     *,
     fraction: float | None = None,
     max_trajectories: int | None = None,
+    max_steps_per_trajectory: int | None = None,
     sampler=None,
     num_workers: int = 0,
     persistent_workers: bool = False,
@@ -252,6 +257,7 @@ def get_data_loader_by_samples(
         input_length_sequence,
         fraction=fraction,
         max_trajectories=max_trajectories,
+        max_steps_per_trajectory=max_steps_per_trajectory,
     )
     effective_shuffle = shuffle and sampler is None
     effective_persistent = persistent_workers if num_workers > 0 else False

@@ -297,6 +297,7 @@ def train(cfg: Config, device: torch.device):
         input_length_sequence=INPUT_SEQUENCE_LENGTH,
         fraction=cfg.train_dataset_fraction,
         max_trajectories=cfg.train_dataset_count,
+        max_steps_per_trajectory=cfg.train_max_steps_per_trajectory,
     )
     feature_sample = train_dataset[0]
     features_sample = (
@@ -352,6 +353,7 @@ def train(cfg: Config, device: torch.device):
             input_length_sequence=INPUT_SEQUENCE_LENGTH,
             fraction=cfg.valid_dataset_fraction,
             max_trajectories=cfg.valid_dataset_count,
+            max_steps_per_trajectory=cfg.valid_max_steps_per_trajectory,
         )
         if len(valid_dataset[0][0]) != feature_components:
             msg = "`valid.npz` と `train.npz` の特徴数が一致していません。"
@@ -397,7 +399,12 @@ def train(cfg: Config, device: torch.device):
             rollout_interval = None
         else:
             rollout_loader = data_loader.get_data_loader_by_trajectories(rollout_dataset_path)
-            rollout_evaluator = RolloutEvaluator(rollout_loader, device, cfg.rollout_max_examples)
+            rollout_evaluator = RolloutEvaluator(
+                rollout_loader,
+                device,
+                cfg.rollout_max_examples,
+                cfg.rollout_max_steps,
+            )
             if is_main_process:
                 _log(f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}")
 

@@ -23,10 +23,12 @@ class RolloutEvaluator:
         loader: torch.utils.data.DataLoader,
         device: torch.device,
         max_examples: int = 1,
+        max_steps: int | None = None,
     ):
         self._loader = loader
         self._device = device
         self._max_examples = max(1, int(max_examples))
+        self._max_steps = None if max_steps is None else max(1, int(max_steps))
         self._iterator: Any | None = None
 
     def evaluate(self, simulator: BaseSimulator) -> dict[str, float | None]:
@@ -85,6 +87,8 @@ class RolloutEvaluator:
         particle_type = particle_type.to(self._device)
 
         nsteps = positions.shape[1] - INPUT_SEQUENCE_LENGTH
+        if self._max_steps is not None:
+            nsteps = min(nsteps, self._max_steps)
         if nsteps <= 0:
             return None
 
@@ -128,6 +132,9 @@ def rollout(
     """逐次1ステップ予測をシフト窓で積み上げるロールアウト"""
     initial_positions = position[:, :INPUT_SEQUENCE_LENGTH]
     ground_truth_positions = position[:, INPUT_SEQUENCE_LENGTH:]
+    # ground_truth_positions の長さが nsteps より長い場合は切り詰める
+    if ground_truth_positions.shape[1] > nsteps:
+        ground_truth_positions = ground_truth_positions[:, :nsteps]
 
     current_positions = initial_positions
     predictions_list = []

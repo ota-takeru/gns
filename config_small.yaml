@@ -71,7 +71,10 @@ validation_interval: 2
 nsave_steps: 10
 rollout_interval: null
 rollout_max_examples: 1
+rollout_max_steps: null
 rollout_dataset: null
+train_max_steps_per_trajectory: null
+valid_max_steps_per_trajectory: null
 train_dataset_fraction: null
 valid_dataset_fraction: null
 train_dataset_count: null
