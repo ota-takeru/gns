@@ -13,10 +13,9 @@
         "takerv/dam-break-left-wall2",
         "takerv/dam-break-left-periodic-zero-g",
         "takerv/gns-40k-100-20",
-        "takerv/dam-break-left-slosh"
+        "takerv/dam-break-left-slosh",
+        "takerv/dam-break-left-slosh2"
     ],
-    
-
     "competition_sources": [],
     "kernel_sources": []
 }
