@@ -19,8 +19,6 @@ rollout_interval: 50
 rollout_max_examples: 1
 rollout_max_steps: null
 rollout_dataset: valid
-train_max_steps_per_trajectory: null
-valid_max_steps_per_trajectory: null
 train_dataset_fraction: 0.5
 valid_dataset_fraction: 0.5
 train_dataset_count: null

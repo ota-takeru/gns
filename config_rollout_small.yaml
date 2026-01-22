@@ -69,8 +69,6 @@ model_file: latest
 
 rollout_inference_max_examples: 1
 rollout_max_steps: null
-train_max_steps_per_trajectory: null
-valid_max_steps_per_trajectory: null
 noise_std: 0.0
 noise: random_walk
 loss: acceleration

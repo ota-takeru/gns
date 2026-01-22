@@ -297,7 +297,6 @@ def train(cfg: Config, device: torch.device):
         input_length_sequence=INPUT_SEQUENCE_LENGTH,
         fraction=cfg.train_dataset_fraction,
         max_trajectories=cfg.train_dataset_count,
-        max_steps_per_trajectory=cfg.train_max_steps_per_trajectory,
     )
     feature_sample = train_dataset[0]
     features_sample = (
@@ -353,7 +352,6 @@ def train(cfg: Config, device: torch.device):
             input_length_sequence=INPUT_SEQUENCE_LENGTH,
             fraction=cfg.valid_dataset_fraction,
             max_trajectories=cfg.valid_dataset_count,
-            max_steps_per_trajectory=cfg.valid_max_steps_per_trajectory,
         )
         if len(valid_dataset[0][0]) != feature_components:
             msg = "`valid.npz` と `train.npz` の特徴数が一致していません。"

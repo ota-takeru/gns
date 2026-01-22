@@ -83,19 +83,11 @@ def predict(cfg: Config, device: torch.device):
                 break
             print(f"processing example number {example_i}")
             positions = features[0].to(device)
-            max_steps_cap = cfg.train_max_steps_per_trajectory
-            if max_steps_cap is not None:
-                max_steps_cap = max(1, int(max_steps_cap))
-                max_total_len = INPUT_SEQUENCE_LENGTH + max_steps_cap
-                if positions.shape[1] > max_total_len:
-                    positions = positions[:, :max_total_len]
             if metadata.get("sequence_length") is not None:
                 nsteps = int(metadata["sequence_length"]) - INPUT_SEQUENCE_LENGTH
             else:
                 sequence_length = positions.shape[1]
                 nsteps = int(sequence_length) - INPUT_SEQUENCE_LENGTH
-            if max_steps_cap is not None:
-                nsteps = min(nsteps, max_steps_cap)
             if cfg.rollout_max_steps is not None:
                 nsteps = min(nsteps, int(cfg.rollout_max_steps))
 
