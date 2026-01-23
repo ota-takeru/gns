@@ -82,9 +82,6 @@ model_file: null
 
 # 推論（rollout）時の制御
 rollout_inference_max_examples: 1 # 生成するシーン（pkl）数の上限。null で全件
-rollout_max_steps: null # ロールアウト生成時の最大ステップ数(null で軌道全体)
-train_max_steps_per_trajectory: null
-valid_max_steps_per_trajectory: null
 noise_std: 0.0003 # 正規化統計用のノイズ設定（推論で参照）
 noise: random_walk
 loss: acceleration

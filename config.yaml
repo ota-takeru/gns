@@ -85,10 +85,7 @@ validation_interval: 1000 # 例: 10000 にするとステップごとに簡易va
 nsave_steps: 50000
 rollout_interval: 20000 # ロールアウト計測を無効化する場合は null
 rollout_max_examples: 1 # ロールアウト評価に使うシーン数
-rollout_max_steps: null # ロールアウト計測で積む最大ステップ数(null で軌道全体)
 rollout_dataset: null # null なら valid/test/train の順で自動選択
-train_max_steps_per_trajectory: null # 学習データ各軌道の使用ステップ上限
-valid_max_steps_per_trajectory: null # 検証データ各軌道の使用ステップ上限
 train_dataset_fraction: null # 0-1 で学習データを間引く(nullで全量)
 valid_dataset_fraction: null # 0-1 で検証データを間引く(nullで全量)
 train_dataset_count: null # 学習データの使用件数を直接指定(nullで制限なし)
