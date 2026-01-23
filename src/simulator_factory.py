@@ -65,18 +65,6 @@ def _get_simulator(
     method_name = getattr(cfg, "method", "gns")
     method_options_all = getattr(cfg, "method_options", {}) or {}
     method_options = method_options_all.get(method_name, {}) or {}
-    if method_name == "gns":
-        edge_relative_velocity = bool(method_options.get("edge_relative_velocity", False))
-        if edge_relative_velocity:
-            base_nedge_in = int(nedge_in)
-            # 法線方向スカラー + 接線ベクトル(dim) を追加
-            nedge_in = base_nedge_in + (1 + int(metadata["dim"]))
-            if "nedge_in" in metadata and metadata["nedge_in"] != nedge_in:
-                print(
-                    "[simulator_factory] gns.edge_relative_velocity=True のため "
-                    f"nedge_in を {metadata['nedge_in']} から {nedge_in} に上書きします。"
-                )
-
     def _estimate_particle_mass(meta: dict) -> float | None:
         """メタデータから粒子質量を推定する。
 

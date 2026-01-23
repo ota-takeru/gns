@@ -77,7 +77,6 @@ class GNSSimulator(BaseSimulator):
         boundaries: np.ndarray,
         boundary_clamp_limit: float = 1.0,
         boundary_mode: str = BOUNDARY_MODE_WALLS,
-        edge_relative_velocity: bool = False,
         device: torch.device | str = "cpu",
     ) -> None:
         super().__init__()
@@ -112,7 +111,6 @@ class GNSSimulator(BaseSimulator):
             self._periodic_length = None
             self._boundary_clamp_limit = boundary_clamp_limit
         self._device = device
-        self._edge_relative_velocity = bool(edge_relative_velocity)
         self._neighbor_debug_logged = False
         self._neighbor_debug_info = None
 
@@ -364,30 +362,9 @@ class GNSSimulator(BaseSimulator):
         normalized_relative_distances = torch.norm(
             normalized_relative_displacements, dim=-1, keepdim=True
         )  # [E, 1]
-
-        edge_features_list = [normalized_relative_displacements, normalized_relative_distances]
-        if self._edge_relative_velocity:
-            # 法線/接線分解は「生の速度差分」で行い、最後にスカラーで正規化する
-            most_recent_velocity_raw = velocity_sequence[:, -1]  # [N, D]
-            rel_v = most_recent_velocity_raw[senders, :] - most_recent_velocity_raw[receivers, :]  # [E, D]
-            eps = 1e-8
-            dist = torch.norm(relative_displacements, dim=-1, keepdim=True)  # [E, 1]
-            r_hat = relative_displacements / (dist + eps)  # 単位ベクトル（幾何に忠実）
-            v_n = (rel_v * r_hat).sum(dim=-1, keepdim=True)  # [E, 1]
-            v_t = rel_v - v_n * r_hat  # [E, D]
-            v_t_mag = torch.norm(v_t, dim=-1, keepdim=True)  # [E, 1]
-
-            v_std = velocity_stats["std"]
-            if torch.is_tensor(v_std):
-                v_scale = v_std.mean()
-            else:
-                v_scale = torch.as_tensor(v_std, device=rel_v.device, dtype=rel_v.dtype).mean()
-
-            v_n = v_n / (v_scale + eps)
-            v_t_mag = v_t_mag / (v_scale + eps)
-
-            edge_features_list.extend([v_n, v_t_mag])
-        edge_features = torch.cat(edge_features_list, dim=-1)
+        edge_features = torch.cat(
+            [normalized_relative_displacements, normalized_relative_distances], dim=-1
+        )
 
         # ------edge_indexの計算------
         edge_index = torch.stack([senders, receivers])  # [2, E]
@@ -497,36 +474,6 @@ class GNSSimulator(BaseSimulator):
 
     def load(self, path: str):
         state_dict = torch.load(path, map_location=torch.device("cpu"))
-
-        # 互換性: edge_relative_velocity 導入前に学習したチェックポイントは
-        # エッジ入力次元が 3 のまま。現在のモデルが 6 次元を期待する場合は、
-        # 既存重みをコピーし、新規チャネルを 0 でパディングして読み込む。
-        weight_key = "_encode_process_decode.encoder.edge_fn.0.NN-0.weight"
-        if weight_key in state_dict:
-            current_weight = self._encode_process_decode.encoder.edge_fn[0][0].weight
-            target_in = current_weight.shape[1]
-            loaded_weight = state_dict[weight_key]
-            loaded_in = loaded_weight.shape[1]
-            if loaded_in != target_in:
-                if loaded_in < target_in and self._edge_relative_velocity:
-                    pad_cols = target_in - loaded_in
-                    pad = torch.zeros(
-                        loaded_weight.shape[0],
-                        pad_cols,
-                        device=loaded_weight.device,
-                        dtype=loaded_weight.dtype,
-                    )
-                    state_dict[weight_key] = torch.cat([loaded_weight, pad], dim=1)
-                    print(
-                        "[learned_simulator] 旧チェックポイントを edge_relative_velocity "
-                        "対応に合わせるため、edge MLP 入力重みをパディングしました。"
-                    )
-                else:
-                    raise RuntimeError(
-                        f"Edge MLP 入力次元が一致しません (checkpoint {loaded_in} != model {target_in}). "
-                        "モデル再学習か設定の見直しが必要です。"
-                    )
-
         self.load_state_dict(state_dict)
 
     def _normalize_boundary_mode(self, mode: str) -> str:

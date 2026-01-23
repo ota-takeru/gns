@@ -70,8 +70,6 @@ method_options:
     include_external_acceleration: true
     pos_feature_scale: null # null で半径を使用
     vel_feature_scale: null # null で pos_feature_scale/dt
-  gns:
-    edge_relative_velocity: true
 model_path: ./models/ # モデルやtrain_stateの保存先
 output_path: ./rollouts/
 output_filename: rollout
