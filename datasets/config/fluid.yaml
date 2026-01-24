@@ -3,16 +3,14 @@ output_root: ./datasets/out_fluid
 defaults:
   timesteps: 240
   dt: 0.006
-  solver_substeps: 2
+  solver_substeps: 4
   particle_spacing: 0.12
   kernel_radius_scale: 2.0
   rest_density: 1000.0
   stiffness: 2000.0
-  sound_speed: 40.0
   viscosity: 45.0
   boundary_damping: 0.35
   boundary_clamp_limit: 1.0
-  wall_particle_layers: 0
   xsph_factor: 0.05
   position_noise: 0.08
   gravity: [0.0, -9.81]
@@ -24,65 +22,38 @@ defaults:
     bottom: 0.0
     top: 6.0
   emitter:
-    origin: [-4.0, 0.3]
+    origin: [-4.0, 0.1]
     size: [3.5, 3.5]
     jitter: 0.2
     initial_velocity: [0.0, 0.0]
-    random_velocity_scale: 0.6
+    random_velocity_scale: 0.3
     fill_ratio_range: [0.85, 1.05]
 
 cases:
   - name: dam_break_left
     seed: 100
-    output_subdir: dam_break_left_wall2
-    wall_particle_layers: 2
-    boundary_mode: walls
 
-  - name: dam_break_left_slosh
-    seed: 120
-    output_subdir: dam_break_left_slosh
-    num_train_scenes: 100
+  - name: dam_break_left_100
+    seed: 100
+    timesteps: 100
+
+  - name: dam_break_left_200
+    seed: 100
+    timesteps: 200
+
+  - name: dam_break_left_400
+    seed: 100
+    timesteps: 400
+
+  - name: dam_break_left_800
+    seed: 100
+    timesteps: 800
+
+  - name: dam_break_left_800_2x
+    seed: 100
+    timesteps: 800
+    num_train_scenes: 200
     num_valid_scenes: 20
-    timesteps: 240
-    dt: 0.006
-    solver_substeps: 4
-    wall_particle_layers: 3
-    viscosity: 45.0
-    boundary_damping: 0.35
-    xsph_factor: 0.05
-    emitter:
-      fill_ratio_range: [1.0, 1.05]
-      initial_velocity: [0.5, 0.0]
-      random_velocity_scale: 0.4
-    boundary_mode: walls
-
-  - name: dam_break_left_periodic_zero_g
-    seed: 150
-    output_subdir: dam_break_left_periodic_zero_g
-    gravity: [0.0, 0.0]
-    boundary_mode: periodic
-    boundary_clamp_limit: 0.0
-    wall_particle_layers: 0
-
-  - name: tank_sloshing
-    seed: 310
-    output_subdir: tank_sloshing
-    dt: 0.003
-    timesteps: 720
-    emitter:
-      origin: [-4.2, 0.3]
-      size: [8.4, 2.4]
-      jitter: 0.05
-      random_velocity_scale: 0.25
-      fill_ratio_range: [0.9, 1.0]
-    wall_particle_layers: 2
-    tank_motion:
-      axis: x
-      amplitude: 4.0
-      frequency: 0.85
-      phase: 0.0
-      ramp_time: 0.6
-      offset: 0.0
 
   # - name: dam_break_right
   #   seed: 200
