@@ -10,6 +10,9 @@
     "dataset_sources": [
         "takerv/gns-codes",
         "takerv/dam-break-left",
+        "takerv/dam-break-left-100",
+        "takerv/dam-break-left-200",
+        "takerv/dam-break-left-400",
         "takerv/dam-break-left-800",
         "takerv/dam-break-left-800-2x",
         "takerv/dam-break-left-wall2",
