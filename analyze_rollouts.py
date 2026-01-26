@@ -49,10 +49,19 @@ def _guess_rollouts_dir(cli_path: str | None) -> Path:
     return Path("rollouts")
 
 
-def analyze_rollout(pkl_path: Path) -> dict:
-    """rollout結果を分析"""
+def analyze_rollout(pkl_path: Path, dt: float | None = None) -> dict:
+    """rollout結果を分析
+
+    Args:
+        pkl_path: rollouts/*.pkl
+        dt: 速度計算に用いる刻み幅（None で 1.0 とみなす）
+    """
     with pkl_path.open("rb") as f:
         data = pickle.load(f)
+
+    # dt が無効値ならデフォルト 1.0
+    if dt is None or not isinstance(dt, (int, float)) or dt <= 0:
+        dt = 1.0
 
     # データを取得
     predicted_rollout = data["predicted_rollout"]  # (T_pred, B=1, N, D)
@@ -75,6 +84,22 @@ def analyze_rollout(pkl_path: Path) -> dict:
     mean_distance_error_per_timestep = distance_error.mean(axis=1)  # (T,)
     mean_distance_error = distance_error.mean()
 
+    # 速度誤差（位置差分 / dt）
+    velocity_pred = np.diff(predicted_rollout, axis=0) / dt  # (T-1, N, D)
+    velocity_gt = np.diff(ground_truth_rollout, axis=0) / dt
+    velocity_error = velocity_pred - velocity_gt
+    velocity_distance_error = np.sqrt((velocity_error**2).sum(axis=-1))  # (T-1, N)
+    mean_velocity_error_per_timestep = velocity_distance_error.mean(axis=1)  # (T-1,)
+    mean_velocity_error = velocity_distance_error.mean()
+
+    # 加速度誤差（速度差分 / dt）
+    acceleration_pred = np.diff(velocity_pred, axis=0) / dt  # (T-2, N, D)
+    acceleration_gt = np.diff(velocity_gt, axis=0) / dt
+    acceleration_error = acceleration_pred - acceleration_gt
+    acceleration_distance_error = np.sqrt((acceleration_error**2).sum(axis=-1))  # (T-2, N)
+    mean_acceleration_error_per_timestep = acceleration_distance_error.mean(axis=1)
+    mean_acceleration_error = acceleration_distance_error.mean()
+
     return {
         "file": pkl_path.name,
         "n_timesteps": len(predicted_rollout),
@@ -84,6 +109,10 @@ def analyze_rollout(pkl_path: Path) -> dict:
         "mean_distance_error": mean_distance_error,
         "mse_per_timestep": mse_per_timestep,
         "distance_error_per_timestep": mean_distance_error_per_timestep,
+        "mean_velocity_error": mean_velocity_error,
+        "velocity_error_per_timestep": mean_velocity_error_per_timestep,
+        "mean_acceleration_error": mean_acceleration_error,
+        "acceleration_error_per_timestep": mean_acceleration_error_per_timestep,
         "loss_from_file": data.get("loss", None),
     }
 
@@ -135,6 +164,8 @@ def main():
         print(f"  - 次元: {result['dimension']}D")
         print(f"  - MSE (total): {result['mse_total']:.6f}")
         print(f"  - 平均距離誤差: {result['mean_distance_error']:.6f}")
+        print(f"  - 平均速度誤差: {result['mean_velocity_error']:.6f}")
+        print(f"  - 平均加速度誤差: {result['mean_acceleration_error']:.6f}")
         if result["loss_from_file"] is not None:
             print(f"  - ファイル記録ロス: {result['loss_from_file']:.6f}")
         print()
@@ -146,8 +177,12 @@ def main():
     print(f"  - 総rollout数: {len(results)}")
     avg_mse = np.mean([r["mse_total"] for r in results])
     avg_distance_error = np.mean([r["mean_distance_error"] for r in results])
+    avg_velocity_error = np.mean([r["mean_velocity_error"] for r in results])
+    avg_acceleration_error = np.mean([r["mean_acceleration_error"] for r in results])
     print(f"  - 平均MSE: {avg_mse:.6f}")
     print(f"  - 平均距離誤差: {avg_distance_error:.6f}")
+    print(f"  - 平均速度誤差: {avg_velocity_error:.6f}")
+    print(f"  - 平均加速度誤差: {avg_acceleration_error:.6f}")
 
     # タイムステップごとの誤差推移
     print(f"\n{'='*80}")
@@ -156,14 +191,26 @@ def main():
     if results:
         first = results[0]
         n_steps = len(first["mse_per_timestep"])
+        n_steps_vel = len(first["velocity_error_per_timestep"])
+        n_steps_acc = len(first["acceleration_error_per_timestep"])
         # 10ステップごとに表示
         step_interval = max(1, n_steps // 10)
-        print(f"{'Step':<10}{'MSE':<15}{'距離誤差':<15}")
-        print(f"{'-'*40}")
+        print(f"{'Step':<10}{'MSE':<15}{'距離誤差':<15}{'速度誤差':<15}{'加速度誤差':<15}")
+        print(f"{'-'*70}")
         for i in range(0, n_steps, step_interval):
             mse = first["mse_per_timestep"][i]
             dist_err = first["distance_error_per_timestep"][i]
-            print(f"{i:<10}{mse:<15.6f}{dist_err:<15.6f}")
+            vel_err = (
+                first["velocity_error_per_timestep"][min(i, n_steps_vel - 1)]
+                if n_steps_vel
+                else float("nan")
+            )
+            acc_err = (
+                first["acceleration_error_per_timestep"][min(i, n_steps_acc - 1)]
+                if n_steps_acc
+                else float("nan")
+            )
+            print(f"{i:<10}{mse:<15.6f}{dist_err:<15.6f}{vel_err:<15.6f}{acc_err:<15.6f}")
 
     print(f"\n{'='*80}")
     print(f"分析完了")
