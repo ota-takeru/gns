@@ -256,6 +256,13 @@ if (( file_count == 0 )); then
   echo "データセットに実ファイルがありません。dataset-metadata.json 以外のファイルを配置してください。" | tee -a "$LOG3"
   exit 1
 fi
+latest_version_before=$(
+  kaggle datasets status "$DATASET_ID" 2>/dev/null \
+    | grep -Eo 'versionNumber: [0-9]+' \
+    | head -n1 \
+    | awk '{print $2}'
+) || true
+echo "最新バージョン (実行前): ${latest_version_before:-none}" | tee -a "$LOG3"
 if kaggle datasets status "$DATASET_ID" >/dev/null 2>&1; then
   echo "既存データセットを検出: ${DATASET_ID} -> version を作成します。" | tee -a "$LOG3"
   kaggle datasets version -p "$DATASET_DIR" --dir-mode zip -m "auto ${TIMESTAMP} ${GIT_SHA}" 2>&1 | tee -a "$LOG3"
@@ -273,10 +280,27 @@ while true; do
   status_out=$(kaggle datasets status "$DATASET_ID" 2>&1 | tee -a "$LOG3")
   status_rc=${PIPESTATUS[0]}
   set -o pipefail
+  current_version=$(
+    echo "$status_out" \
+      | grep -Eo 'versionNumber: [0-9]+' \
+      | head -n1 \
+      | awk '{print $2}'
+  )
+  ready_flag=0
   if (( status_rc == 0 )) && echo "$status_out" | grep -qiE "ready|complete|success"; then
-    echo "データセットが利用可能になりました (${DATASET_ID})." | tee -a "$LOG3"
+    ready_flag=1
+  fi
+  new_version_seen=0
+  if [[ -n "$current_version" ]]; then
+    if [[ -z "$latest_version_before" || "$current_version" != "$latest_version_before" ]]; then
+      new_version_seen=1
+    fi
+  fi
+  if (( ready_flag == 1 && new_version_seen == 1 )); then
+    echo "データセットが利用可能になりました (${DATASET_ID}) version=${current_version}." | tee -a "$LOG3"
     break
   fi
+  echo "waiting... ready=${ready_flag} version=${current_version:-unknown} (before=${latest_version_before:-none})" | tee -a "$LOG3"
   now_ts=$(date +%s)
   if (( now_ts - dataset_wait_start > dataset_wait_timeout )); then
     echo "データセットの準備待ちがタイムアウトしました (${dataset_wait_timeout}s)。" | tee -a "$LOG3"
