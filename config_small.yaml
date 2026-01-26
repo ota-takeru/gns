@@ -67,7 +67,7 @@ noise_std: 0.0
 noise: random_walk
 loss: acceleration
 ntraining_steps: 5
-validation_interval: 2
+validation_interval: null # ステップ検証を無効化（エポック検証のみ）
 nsave_steps: 10
 rollout_interval: null
 rollout_max_examples: 1

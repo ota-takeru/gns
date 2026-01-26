@@ -182,7 +182,7 @@ def train(cfg: Config, device: torch.device):
     valid_loss_hist: list[tuple[int, float]] = []
     latest_valid_loss_value: float | None = None
     latest_rollout_metrics: dict[str, float | None] | None = None
-    valid_loss: torch.Tensor | None = None
+    valid_loss: float | None = None
     train_loss = 0.0
 
     if cfg.model_file is not None:
@@ -345,8 +345,7 @@ def train(cfg: Config, device: torch.device):
 
     validation_interval = cfg.validation_interval
     dl_valid = None
-    dl_valid_iter = None
-    if is_main_process and validation_interval is not None:
+    if is_main_process:
         valid_dataset = data_loader.SamplesDataset(
             path=Path(cfg.data_path) / "valid.npz",
             input_length_sequence=INPUT_SEQUENCE_LENGTH,
@@ -368,18 +367,42 @@ def train(cfg: Config, device: torch.device):
         if cfg.prefetch_factor is not None and cfg.num_workers > 0:
             valid_loader_kwargs["prefetch_factor"] = cfg.prefetch_factor
         dl_valid = torch.utils.data.DataLoader(valid_dataset, **valid_loader_kwargs)
-        dl_valid_iter = iter(dl_valid)
         _log(f"[data] valid_samples={len(valid_dataset)}")
 
-    def _next_valid_example():
-        nonlocal dl_valid_iter
-        if dl_valid is None or dl_valid_iter is None:
-            return None
-        try:
-            return next(dl_valid_iter)
-        except StopIteration:
-            dl_valid_iter = iter(dl_valid)
-            return next(dl_valid_iter)
+    def _run_full_validation() -> tuple[float | None, dict[str, float | None] | None]:
+        """検証データローダー全体で平均損失を計算する。バッチ数基準の単純平均。"""
+        if dl_valid is None:
+            return None, None
+        total_loss = 0.0
+        total_near = 0.0
+        total_away = 0.0
+        n_loss = 0
+        n_near = 0
+        n_away = 0
+        with torch.no_grad():
+            for valid_example in dl_valid:
+                loss_tensor, split = validation(
+                    simulator,
+                    valid_example,
+                    feature_components,
+                    cfg,
+                    device,
+                )
+                loss_val = float(loss_tensor.item())
+                total_loss += loss_val
+                n_loss += 1
+                if split.get("near") is not None:
+                    total_near += split["near"]
+                    n_near += 1
+                if split.get("away") is not None:
+                    total_away += split["away"]
+                    n_away += 1
+        if n_loss == 0:
+            return None, None
+        mean_loss = total_loss / n_loss
+        near_mean = (total_near / n_near) if n_near > 0 else None
+        away_mean = (total_away / n_away) if n_away > 0 else None
+        return mean_loss, {"near": near_mean, "away": away_mean}
 
     rollout_evaluator: RolloutEvaluator | None = None
     rollout_interval = (
@@ -489,24 +512,20 @@ def train(cfg: Config, device: torch.device):
             and step > 0
             and step % validation_interval == 0
         ):
-            sampled_valid_example = _next_valid_example()
-            if sampled_valid_example is not None:
-                with torch.no_grad():
-                    valid_loss_tensor, valid_split = validation(
-                        simulator,
-                        sampled_valid_example,
-                        feature_components,
-                        cfg,
-                        device,
-                    )
-                valid_loss = valid_loss_tensor
-                latest_valid_loss_value = float(valid_loss_tensor.item())
-                latest_valid_split = valid_split
+            valid_mean, valid_split_mean = _run_full_validation()
+            if valid_mean is not None and valid_split_mean is not None:
+                valid_loss = valid_mean
+                latest_valid_loss_value = valid_mean
+                latest_valid_split = valid_split_mean
                 near_str = (
-                    f"{valid_split['near']:.6f}" if valid_split.get("near") is not None else "-"
+                    f"{valid_split_mean['near']:.6f}"
+                    if valid_split_mean.get("near") is not None
+                    else "-"
                 )
                 away_str = (
-                    f"{valid_split['away']:.6f}" if valid_split.get("away") is not None else "-"
+                    f"{valid_split_mean['away']:.6f}"
+                    if valid_split_mean.get("away") is not None
+                    else "-"
                 )
                 _log(
                     f"[valid @ step {step}] total={latest_valid_loss_value:.6f} "
@@ -514,11 +533,11 @@ def train(cfg: Config, device: torch.device):
                 )
                 if tb_writer is not None:
                     tb_writer.add_scalar("valid/loss", latest_valid_loss_value, step)
-                    if valid_split.get("near") is not None:
-                        tb_writer.add_scalar("valid/near_wall", float(valid_split["near"]), step)
-                    if valid_split.get("away") is not None:
+                    if valid_split_mean.get("near") is not None:
+                        tb_writer.add_scalar("valid/near_wall", float(valid_split_mean["near"]), step)
+                    if valid_split_mean.get("away") is not None:
                         tb_writer.add_scalar(
-                            "valid/away_from_wall", float(valid_split["away"]), step
+                            "valid/away_from_wall", float(valid_split_mean["away"]), step
                         )
             else:
                 _log("Warning: validation loader is empty; skipping validation step.")
@@ -740,7 +759,7 @@ def train(cfg: Config, device: torch.device):
                 epoch,
                 optimizer,
                 train_loss,
-                float(valid_loss.item()) if valid_loss is not None else None,
+                valid_loss,
                 train_loss_hist,
                 valid_loss_hist,
             )
@@ -820,38 +839,30 @@ def train(cfg: Config, device: torch.device):
             epoch_avg = (epoch_train_loss / steps_this_epoch) if steps_this_epoch > 0 else 0.0
             if is_main_process:
                 train_loss_hist.append((epoch, float(epoch_avg)))
-                if dl_valid is not None and validation_interval is not None:
-                    sampled_valid_example = _next_valid_example()
-                    if sampled_valid_example is not None:
-                        with torch.no_grad():
-                            epoch_valid_loss, epoch_valid_split = validation(
-                                simulator,
-                                sampled_valid_example,
-                                feature_components,
-                                cfg,
-                                device,
-                            )
-                        epoch_valid_loss_float = float(epoch_valid_loss.item())
-                        valid_loss_hist.append((epoch, epoch_valid_loss_float))
-                        latest_valid_loss_value = epoch_valid_loss_float
-                        latest_valid_split = epoch_valid_split
+                if dl_valid is not None:
+                    epoch_valid_loss_mean, epoch_valid_split_mean = _run_full_validation()
+                    if epoch_valid_loss_mean is not None and epoch_valid_split_mean is not None:
+                        valid_loss = epoch_valid_loss_mean
+                        valid_loss_hist.append((epoch, epoch_valid_loss_mean))
+                        latest_valid_loss_value = epoch_valid_loss_mean
+                        latest_valid_split = epoch_valid_split_mean
                         near_str = (
-                            f"{epoch_valid_split['near']:.6f}"
-                            if epoch_valid_split.get("near") is not None
+                            f"{epoch_valid_split_mean['near']:.6f}"
+                            if epoch_valid_split_mean.get("near") is not None
                             else "-"
                         )
                         away_str = (
-                            f"{epoch_valid_split['away']:.6f}"
-                            if epoch_valid_split.get("away") is not None
+                            f"{epoch_valid_split_mean['away']:.6f}"
+                            if epoch_valid_split_mean.get("away") is not None
                             else "-"
                         )
                         _log(
                             f"[epoch {epoch}] train={epoch_avg:.6f} "
-                            f"valid={epoch_valid_loss_float:.6f} "
+                            f"valid={epoch_valid_loss_mean:.6f} "
                             f"near={near_str} away={away_str}"
                         )
                         if tb_writer is not None:
-                            tb_writer.add_scalar("epoch/valid_loss", epoch_valid_loss_float, epoch)
+                            tb_writer.add_scalar("epoch/valid_loss", epoch_valid_loss_mean, epoch)
                     else:
                         _log(
                             f"[epoch {epoch}] train={epoch_avg:.6f} (validation skipped: dataset empty)"
@@ -883,7 +894,7 @@ def train(cfg: Config, device: torch.device):
                 epoch,
                 optimizer,
                 train_loss,
-                float(valid_loss.item()) if valid_loss is not None else None,
+                valid_loss,
                 train_loss_hist,
                 valid_loss_hist,
             )
