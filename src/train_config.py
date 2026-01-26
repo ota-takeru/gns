@@ -40,8 +40,6 @@ class Config:
     rollout_interval: int | None = None
     rollout_max_examples: int = 1
     rollout_dataset: str | None = None
-    # rollout 指標を計算するときの最大ステップ数(None なら軌道全体)
-    rollout_max_steps: int | None = None
     # rollout(推論)時に保存するシーン数の上限(Noneで全件)
     rollout_inference_max_examples: int | None = None
     train_dataset_fraction: float | None = None

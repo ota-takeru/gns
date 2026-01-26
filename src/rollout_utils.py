@@ -23,12 +23,10 @@ class RolloutEvaluator:
         loader: torch.utils.data.DataLoader,
         device: torch.device,
         max_examples: int = 1,
-        max_steps: int | None = None,
     ):
         self._loader = loader
         self._device = device
         self._max_examples = max(1, int(max_examples))
-        self._max_steps = None if max_steps is None else max(1, int(max_steps))
         self._iterator: Any | None = None
 
     def evaluate(self, simulator: BaseSimulator) -> dict[str, float | None]:
@@ -87,8 +85,6 @@ class RolloutEvaluator:
         particle_type = particle_type.to(self._device)
 
         nsteps = positions.shape[1] - INPUT_SEQUENCE_LENGTH
-        if self._max_steps is not None:
-            nsteps = min(nsteps, self._max_steps)
         if nsteps <= 0:
             return None
 

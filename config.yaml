@@ -70,8 +70,6 @@ method_options:
     include_external_acceleration: true
     pos_feature_scale: null # null で半径を使用
     vel_feature_scale: null # null で pos_feature_scale/dt
-  gns:
-    edge_relative_velocity: true
 model_path: ./models/ # モデルやtrain_stateの保存先
 output_path: ./rollouts/
 output_filename: rollout
@@ -87,7 +85,6 @@ validation_interval: 1000 # 例: 10000 にするとステップごとに簡易va
 nsave_steps: 50000
 rollout_interval: 20000 # ロールアウト計測を無効化する場合は null
 rollout_max_examples: 1 # ロールアウト評価に使うシーン数
-rollout_max_steps: null # ロールアウト計測で積む最大ステップ数(null で軌道全体)
 rollout_dataset: null # null なら valid/test/train の順で自動選択
 train_dataset_fraction: null # 0-1 で学習データを間引く(nullで全量)
 valid_dataset_fraction: null # 0-1 で検証データを間引く(nullで全量)

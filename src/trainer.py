@@ -401,7 +401,6 @@ def train(cfg: Config, device: torch.device):
                 rollout_loader,
                 device,
                 cfg.rollout_max_examples,
-                cfg.rollout_max_steps,
             )
             if is_main_process:
                 _log(f"Rollout metrics every {rollout_interval} steps using {rollout_dataset_path}")

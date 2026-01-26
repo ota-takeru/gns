@@ -88,8 +88,6 @@ def predict(cfg: Config, device: torch.device):
             else:
                 sequence_length = positions.shape[1]
                 nsteps = int(sequence_length) - INPUT_SEQUENCE_LENGTH
-            if cfg.rollout_max_steps is not None:
-                nsteps = min(nsteps, int(cfg.rollout_max_steps))
 
             particle_type = features[1].to(device)
             if material_property_as_feature:

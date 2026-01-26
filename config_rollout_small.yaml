@@ -68,7 +68,6 @@ output_filename: rollout_small
 model_file: latest
 
 rollout_inference_max_examples: 1
-rollout_max_steps: null
 noise_std: 0.0
 noise: random_walk
 loss: acceleration
